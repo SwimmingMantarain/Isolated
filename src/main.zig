@@ -41,7 +41,7 @@ pub fn main() !void {
     glfw.windowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile);
     // glfw.windowHint(glfw.OpenGLForwardCompat, glfw.GLTrue); for macos
 
-    const w = glfw.createWindow(800, 600, "Isolated", null, null) catch {
+    const w = glfw.createWindow(800, 600, "Isolated Game", null, null) catch {
         std.log.err("Failed to create GLFW window!", .{});
         glfw.terminate();
         return;
