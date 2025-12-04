@@ -1,0 +1,480 @@
+const std = @import("std");
+const math = @import("zlm").as(f32);
+const glfw = @import("glfw");
+const noize = @import("noize");
+
+const Shader = @import("./shader.zig").Shader;
+const World = @import("./worldgen/world.zig").World;
+
+const cglfw = @cImport({
+    @cInclude("GLFW/glfw3.h");
+});
+
+const gl = @cImport({
+    @cInclude("glad/glad.h");
+});
+
+const cl = @import("cl").cl;
+
+const imgui = @cImport({
+    @cInclude("dcimgui.h");
+    @cInclude("backends/dcimgui_impl_glfw.h");
+    @cInclude("backends/dcimgui_impl_opengl3.h");
+});
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    // GLFW & OpenGL Init
+    const cam = Camera{ .aspect_ratio = 800.0 / 600.0 };
+    var config = Config{ .cam = cam };
+    updateCamDir(&config.cam);
+
+    glfw.init() catch {
+        std.log.err("Failed to init GLFW!", .{});
+        return;
+    };
+    glfw.windowHint(glfw.ContextVersionMajor, 3);
+    glfw.windowHint(glfw.ContextVersionMinor, 3);
+    glfw.windowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile);
+    // glfw.windowHint(glfw.OpenGLForwardCompat, glfw.GLTrue); for macos
+
+    const w = glfw.createWindow(800, 600, "Isolated", null, null) catch {
+        std.log.err("Failed to create GLFW window!", .{});
+        glfw.terminate();
+        return;
+    };
+
+    glfw.makeContextCurrent(w);
+    glfw.swapInterval(0);
+
+    const loader = @as(gl.GLADloadproc, @ptrCast(&cglfw.glfwGetProcAddress));
+    if (gl.gladLoadGLLoader(loader) == 0) {
+        std.log.err("Failed to init GLAD!", .{});
+        glfw.destroyWindow(w);
+        glfw.terminate();
+        return;
+    }
+
+    _ = glfw.setWindowUserPointer(w, &config);
+    _ = glfw.setFramebufferSizeCallback(w, fb_size_callback);
+    _ = glfw.setCursorPosCallback(w, cursor_callback);
+
+    // Imgui init
+    _ = imgui.CIMGUI_CHECKVERSION();
+    _ = imgui.ImGui_CreateContext(null);
+    defer imgui.ImGui_DestroyContext(null);
+
+    const imio = imgui.ImGui_GetIO();
+    imio.*.ConfigFlags = imgui.ImGuiConfigFlags_NavEnableKeyboard;
+
+    imgui.ImGui_StyleColorsDark(null);
+
+    _ = imgui.cImGui_ImplGlfw_InitForOpenGL(@ptrCast(w), true);
+    defer imgui.cImGui_ImplGlfw_Shutdown();
+
+    _ = imgui.cImGui_ImplOpenGL3_InitEx("#version 330");
+    defer imgui.cImGui_ImplOpenGL3_Shutdown();
+
+    // Opengl Shaders
+    var shader = Shader.new();
+
+    if (shader == null) {
+        std.log.err("Failed to create shader!", .{});
+        return;
+    }
+
+    gl.glEnable(gl.GL_DEPTH_TEST);
+
+    // Init OpenCL
+    var platform: cl.cl_platform_id = undefined;
+    _ = cl.clGetPlatformIDs(1, &platform, null);
+
+    var devices: cl.cl_device_id = undefined;
+    _ = cl.clGetDeviceIDs(platform, cl.CL_DEVICE_TYPE_GPU, 1, &devices, null);
+
+    var device_name: [256]u8 = undefined;
+    @memset(device_name[0..256], 0);
+    _ = cl.clGetDeviceInfo(devices, cl.CL_DEVICE_NAME, device_name.len, &device_name, null);
+    std.log.info("Using gpu: {s}", .{device_name});
+
+    // context
+    var err: cl.cl_int = undefined;
+    const cl_context = cl.clCreateContext(null, 1, &devices, null, null, &err);
+
+    if (err != cl.CL_SUCCESS) {
+        std.log.err("Failed to create CL context: {}", .{err});
+        return;
+    }
+    defer _ = cl.clReleaseContext(cl_context);
+
+    // command queue
+    const queue = cl.clCreateCommandQueue(cl_context, devices, 0, &err);
+    if (err != cl.CL_SUCCESS) {
+        std.log.err("Failed to create command queue: {}", .{err});
+        return;
+    }
+    defer _ = cl.clReleaseCommandQueue(queue);
+
+    // Greedy Mesher
+    const mesh_kernel_src = @embedFile("./opencl/greedy_mesh.cl");
+    const mesh_program = cl.clCreateProgramWithSource(
+        cl_context,
+        1,
+        @ptrCast(@constCast(&mesh_kernel_src)),
+        null,
+        &err,
+    );
+    defer _ = cl.clReleaseProgram(mesh_program);
+
+    if (err != cl.CL_SUCCESS or mesh_program == null) {
+        std.log.err("Failed to compile kernel: {any}", .{err});
+        return;
+    }
+
+    err = cl.clBuildProgram(mesh_program, 1, &devices, null, null, null);
+    if (err != cl.CL_SUCCESS) {
+        var log_size: usize = 0;
+        _ = cl.clGetProgramBuildInfo(mesh_program, devices, cl.CL_PROGRAM_BUILD_LOG, 0, null, &log_size);
+        const buf = try alloc.alloc(u8, log_size);
+        defer alloc.free(buf);
+        _ = cl.clGetProgramBuildInfo(mesh_program, devices, cl.CL_PROGRAM_BUILD_LOG, log_size, buf.ptr, null);
+        std.log.err("Failed to build kernel: {s}", .{buf.ptr[0..buf.len]});
+        return;
+    }
+
+    const axis_kernel = cl.clCreateKernel(mesh_program, "build_axis_cols", &err);
+    if (err != cl.CL_SUCCESS) {
+        std.log.err("Failed to create axis kernel: {any}", .{err});
+        return;
+    }
+
+    const cull_kernel = cl.clCreateKernel(mesh_program, "cull", &err);
+    if (err != cl.CL_SUCCESS) {
+        std.log.err("Failed to create culler kernel: {any}", .{err});
+        return;
+    }
+
+    const greedy_kernel = cl.clCreateKernel(mesh_program, "greedy_mesh", &err);
+    if (err != cl.CL_SUCCESS) {
+        std.log.err("Failed to create mesh kernel: {any}", .{err});
+        return;
+    }
+
+    // World Init
+    var world = World{
+        .alloc = alloc,
+        .chunks = undefined,
+        .cl_context = cl_context,
+        .cl_device = devices,
+        .cl_queue = queue,
+        .axis_kernel = axis_kernel,
+        .cull_kernel = cull_kernel,
+        .greedy_kernel = greedy_kernel,
+        .gen = undefined,
+    };
+
+    world.init() catch {
+        std.log.err("Failed to create worker thread!", .{});
+        return;
+    };
+
+    var last_chunk_x: i32 = @intFromFloat(@floor(config.cam.pos.x / 32));
+    var last_chunk_z: i32 = @intFromFloat(@floor(config.cam.pos.z / 32));
+
+    world.load_chunks(&config.cam) catch {
+        std.log.err("Failed to load initial chunks!", .{});
+        return;
+    };
+
+    var last_frame_time = glfw.getTime();
+    var frame_count: u32 = 0;
+    var fps_timer: f64 = 0.0;
+
+    while (!glfw.windowShouldClose(w)) {
+        const current_frame_time = glfw.getTime();
+        const delta_time = current_frame_time - last_frame_time;
+        last_frame_time = current_frame_time;
+
+        frame_count += 1;
+        fps_timer += delta_time;
+
+        if (fps_timer >= 1.0) {
+            const fps = @as(f64, @floatFromInt(frame_count)) / fps_timer;
+            std.log.info("FPS: {d:.1}", .{fps});
+            frame_count = 0;
+            fps_timer = 0.0;
+        }
+
+        processInput(w, &config);
+
+        // Imgui
+        imgui.cImGui_ImplOpenGL3_NewFrame();
+        imgui.cImGui_ImplGlfw_NewFrame();
+        imgui.ImGui_NewFrame();
+
+        // Break & Place blocks
+        if (config.break_block) {
+            config.break_block = false;
+            world.break_block(&config.cam);
+        }
+
+        if (config.place_block) {
+            config.place_block = false;
+            world.place_block(&config.cam);
+        }
+
+        // clear bg
+        gl.glClearColor(0.2, 0.3, 0.3, 1.0);
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
+
+        // draw
+        shader.?.use();
+
+        // matrices :)
+        const proj = math.Mat4.createPerspective(config.cam.fov_rad, config.cam.aspect_ratio, config.cam.near_clip, config.cam.far_clip);
+        const view = math.Mat4.createLookAt(config.cam.pos, config.cam.target, config.cam.up);
+        const light = [3]f32{ 0.2, -0.8, 0.3 }; // above left
+        //const model = math.Mat4.createAngleAxis(math.Vec3.new(1.0, 0.0, 0.0), @floatCast(glfw.getTime()));
+
+        const proj_flat = flattenMatrix(4, proj.fields);
+        const view_flat = flattenMatrix(4, view.fields);
+        //const model_flat = flattenMatrix(4, model.fields);
+
+        const projUni = gl.glGetUniformLocation(shader.?.id, "proj");
+        const viewUni = gl.glGetUniformLocation(shader.?.id, "view");
+        const modelUni = gl.glGetUniformLocation(shader.?.id, "model");
+        const lightDirUni = gl.glGetUniformLocation(shader.?.id, "ldir");
+
+        gl.glUniformMatrix4fv(projUni, 1, gl.GL_FALSE, &proj_flat);
+        gl.glUniformMatrix4fv(viewUni, 1, gl.GL_FALSE, &view_flat);
+        gl.glUniform3fv(lightDirUni, 1, &light);
+        //gl.glUniformMatrix4fv(modelUni, 1, gl.GL_FALSE, &model_flat);
+
+        // update chunks
+        const current_chunk_x: i32 = @intFromFloat(@floor(config.cam.pos.x / 32));
+        const current_chunk_z: i32 = @intFromFloat(@floor(config.cam.pos.z / 32));
+
+        if (current_chunk_x != last_chunk_x or current_chunk_z != last_chunk_z) {
+            world.load_chunks(&config.cam) catch break;
+            world.unload_chunks(&config.cam) catch break;
+            last_chunk_x = current_chunk_x;
+            last_chunk_z = current_chunk_z;
+        }
+
+        // sync generated meshes
+        world.done_mutex.?.lock();
+        while (world.done_queue.?.pop()) |chunk| {
+            if (chunk.state == .Destroying) {
+                chunk.destroy(alloc);
+            } else if (chunk.state == .Ready) {
+                chunk.uploadMesh();
+            }
+        }
+        world.done_mutex.?.unlock();
+
+        // chunks
+        var it = world.chunks.valueIterator();
+        while (it.next()) |chunk_ptr_ptr| {
+            const chunk_ptr = chunk_ptr_ptr.*;
+
+            const chunk_offset = math.Mat4.createTranslation(math.Vec3.new(
+                @as(f32, @floatFromInt(chunk_ptr.pos.x)) * 32.0,
+                @as(f32, @floatFromInt(chunk_ptr.pos.y)) * 32.0,
+                @as(f32, @floatFromInt(chunk_ptr.pos.z)) * 32.0,
+            ));
+
+            const model_flat = flattenMatrix(4, chunk_offset.fields);
+            gl.glUniformMatrix4fv(modelUni, 1, gl.GL_FALSE, &model_flat);
+
+            // Draw chunk
+            gl.glBindVertexArray(chunk_ptr.front_mesh.vao_handle);
+            gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk_ptr.front_mesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
+        }
+        gl.glBindVertexArray(0);
+
+        // redraw imgui
+        draw_gui(&config, imio);
+        imgui.ImGui_Render();
+        imgui.cImGui_ImplOpenGL3_RenderDrawData(imgui.ImGui_GetDrawData());
+
+        // stuff
+        glfw.swapBuffers(w);
+        glfw.pollEvents();
+    }
+
+    world.deinit();
+    glfw.destroyWindow(w);
+    glfw.terminate();
+}
+
+fn flattenMatrix(comptime N: usize, input: [N][N]f32) [N * N]f32 {
+    var out: [N * N]f32 = undefined;
+    for (0..N) |i| {
+        for (0..N) |j| {
+            out[i * N + j] = input[i][j];
+        }
+    }
+    return out;
+}
+
+pub const Camera = struct {
+    fov_rad: f32 = 0.785,
+    aspect_ratio: f32 = 0,
+    near_clip: f32 = 0.1,
+    far_clip: f32 = 10000000.0,
+    pos: math.Vec3 = math.vec3(40.0, 20.0, 40.0),
+    target: math.Vec3 = math.vec3(16.0, 0.0, 16.0),
+    up: math.Vec3 = math.vec3(0.0, 1.0, 0.0),
+    yaw: f32 = -90.0,
+    pitch: f32 = 0.0,
+    sensitivity: f32 = 0.1,
+    first_move: bool = true,
+    last_x: f64 = 400.0,
+    last_y: f64 = 300.0,
+};
+
+const Config = struct {
+    wireframe: bool = false,
+    v_was_pressed: bool = false,
+    f_was_pressed: bool = false,
+    window_width: u32 = 800,
+    window_height: u32 = 600,
+    cam: Camera,
+    break_block: bool = false,
+    place_block: bool = false,
+    last_block_action: f64 = 0.0,
+    block_cooldown: f64 = 0.001,
+    window_focused: bool = false,
+};
+
+fn processInput(w: ?*glfw.Window, config: *Config) void {
+    if (glfw.getKey(w, glfw.KeyEscape) == 1) glfw.setWindowShouldClose(w, true);
+    const v_pressed = glfw.getKey(w, glfw.KeyV) == 1;
+
+    if (v_pressed and !config.v_was_pressed) {
+        config.wireframe = !config.wireframe;
+        if (config.wireframe) {
+            gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE);
+        } else {
+            gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL);
+        }
+    }
+
+    config.v_was_pressed = v_pressed;
+
+    // Toggle focus with F key
+    const f_pressed = glfw.getKey(w, glfw.KeyF) == 1;
+    if (f_pressed and !config.f_was_pressed) {
+        config.window_focused = !config.window_focused;
+        if (config.window_focused) {
+            glfw.setInputMode(w, glfw.Cursor, glfw.CursorDisabled);
+        } else {
+            glfw.setInputMode(w, glfw.Cursor, glfw.CursorNormal);
+        }
+    }
+    config.f_was_pressed = f_pressed;
+
+    // Camera input
+    const speed: f32 = 1.0;
+    const forward = math.Vec3.sub(config.cam.target, config.cam.pos).normalize();
+    const right = math.Vec3.cross(forward, config.cam.up).normalize();
+
+    if (config.window_focused) {
+        if (glfw.getKey(w, glfw.KeyW) == 1) {
+            config.cam.pos = math.Vec3.add(config.cam.pos, math.Vec3.scale(forward, speed));
+            config.cam.target = math.Vec3.add(config.cam.target, math.Vec3.scale(forward, speed));
+        }
+        if (glfw.getKey(w, glfw.KeyS) == 1) {
+            config.cam.pos = math.Vec3.sub(config.cam.pos, math.Vec3.scale(forward, speed));
+            config.cam.target = math.Vec3.sub(config.cam.target, math.Vec3.scale(forward, speed));
+        }
+        if (glfw.getKey(w, glfw.KeyA) == 1) {
+            config.cam.pos = math.Vec3.sub(config.cam.pos, math.Vec3.scale(right, speed));
+            config.cam.target = math.Vec3.sub(config.cam.target, math.Vec3.scale(right, speed));
+        }
+        if (glfw.getKey(w, glfw.KeyD) == 1) {
+            config.cam.pos = math.Vec3.add(config.cam.pos, math.Vec3.scale(right, speed));
+            config.cam.target = math.Vec3.add(config.cam.target, math.Vec3.scale(right, speed));
+        }
+        if (glfw.getKey(w, glfw.KeyE) == 1) {
+            config.cam.pos.y += speed;
+            config.cam.target.y += speed;
+        }
+        if (glfw.getKey(w, glfw.KeyQ) == 1) {
+            config.cam.pos.y -= speed;
+            config.cam.target.y -= speed;
+        }
+
+        const current_time = glfw.getTime();
+        if (current_time - config.last_block_action >= config.block_cooldown) {
+            config.last_block_action = current_time;
+            if (glfw.getMouseButton(w, glfw.MouseButtonLeft) == 1) {
+                config.break_block = true;
+            }
+
+            if (glfw.getMouseButton(w, glfw.MouseButtonRight) == 1) {
+                config.place_block = true;
+            }
+        }
+    }
+}
+
+fn fb_size_callback(w: *c_long, width: c_int, height: c_int) callconv(.c) void {
+    const config = @as(*Config, @ptrCast(@alignCast(glfw.getWindowUserPointer(w).?)));
+    config.window_width = @intCast(width);
+    config.window_height = @intCast(height);
+    const new_ratio: f32 = @as(f32, @floatFromInt(config.window_width)) / @as(f32, @floatFromInt(config.window_height));
+    config.cam.aspect_ratio = new_ratio;
+    gl.glViewport(0, 0, width, height);
+}
+
+fn cursor_callback(w: *c_long, x: f64, y: f64) callconv(.c) void {
+    const config = @as(*Config, @ptrCast(@alignCast(glfw.getWindowUserPointer(w).?)));
+
+    if (!config.window_focused) return;
+
+    if (config.cam.first_move) {
+        config.cam.last_x = x;
+        config.cam.last_y = y;
+        config.cam.first_move = false;
+        return;
+    }
+
+    const x_offset: f32 = @floatCast(x - config.cam.last_x);
+    const y_offset: f32 = @floatCast(y - config.cam.last_y);
+
+    config.cam.last_x = x;
+    config.cam.last_y = y;
+
+    config.cam.yaw += x_offset * config.cam.sensitivity;
+    config.cam.pitch -= y_offset * config.cam.sensitivity;
+
+    if (config.cam.pitch > 89.0) config.cam.pitch = 89.0;
+    if (config.cam.pitch < -89.0) config.cam.pitch = -89.0;
+
+    updateCamDir(&config.cam);
+}
+
+fn updateCamDir(cam: *Camera) void {
+    const yaw_rad = cam.yaw * (std.math.pi / 180.0);
+    const pitch_rad = cam.pitch * (std.math.pi / 180.0);
+
+    const dir = math.vec3(
+        @cos(pitch_rad) * @cos(yaw_rad),
+        @sin(pitch_rad),
+        @cos(pitch_rad) * @sin(yaw_rad),
+    );
+
+    cam.target = math.Vec3.add(cam.pos, dir.normalize());
+}
+
+fn draw_gui(config: *Config, io: [*c]imgui.ImGuiIO_t) void {
+    _ = config;
+    _ = imgui.ImGui_Begin("Isolated", null, 0);
+
+    imgui.ImGui_Text("ms per: %.3f, FPS: %.1f", 1000.0 / io.*.Framerate, io.*.Framerate);
+    imgui.ImGui_End();
+}
