@@ -31,7 +31,7 @@ pub const World = struct {
     cull_kernel: cl.cl_kernel,
     greedy_kernel: cl.cl_kernel,
     gen: *noize.Gen,
-    chunk_radius: u32 = 32,
+    chunk_radius: u32 = 8,
 
     // multithreading shit
     job_queue: ?std.ArrayList(*Chunk) = null,

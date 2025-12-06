@@ -189,25 +189,7 @@ pub fn main() !void {
         return;
     };
 
-    var last_frame_time = glfw.getTime();
-    var frame_count: u32 = 0;
-    var fps_timer: f64 = 0.0;
-
     while (!glfw.windowShouldClose(w)) {
-        const current_frame_time = glfw.getTime();
-        const delta_time = current_frame_time - last_frame_time;
-        last_frame_time = current_frame_time;
-
-        frame_count += 1;
-        fps_timer += delta_time;
-
-        if (fps_timer >= 1.0) {
-            const fps = @as(f64, @floatFromInt(frame_count)) / fps_timer;
-            std.log.info("FPS: {d:.1}", .{fps});
-            frame_count = 0;
-            fps_timer = 0.0;
-        }
-
         processInput(w, &config);
 
         // Imgui
