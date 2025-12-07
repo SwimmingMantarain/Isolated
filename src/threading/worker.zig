@@ -107,8 +107,8 @@ pub fn meshWorker(
                     };
 
                     world.job_mutex.?.lock();
+                    defer world.job_mutex.?.unlock();
                     try world.job_queue.?.append(world.alloc, pendingMeshJob);
-                    world.job_mutex.?.unlock();
                 }
 
                 world.job_mutex.?.lock();
@@ -138,6 +138,7 @@ pub fn meshWorker(
 
                 world.alloc.free(job.chunks);
             } else { // destroy
+                world.chunks_mutex.lock();
                 for (job.chunks) |hash| {
                     const kv = world.chunks.fetchRemove(hash) orelse continue;
                     const chunk = kv.value;
@@ -145,6 +146,7 @@ pub fn meshWorker(
                     chunk.mutex.unlock();
                     chunk.destroy(world.alloc);
                 }
+                world.chunks_mutex.unlock();
 
                 world.alloc.free(job.chunks);
             }
