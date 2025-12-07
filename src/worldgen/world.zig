@@ -7,7 +7,7 @@ const Camera = @import("../main.zig").Camera;
 const ChunkCoord = @import("./chunk.zig").ChunkCoord;
 const Chunk = @import("./chunk.zig").Chunk;
 const ChunkJob = @import("./chunk.zig").ChunkJob;
-const Face = @import("./chunk.zig").Face;
+const Face = @import("../world/block.zig").Face;
 const meshWorker = @import("./chunk.zig").meshWorker;
 
 const gl = @cImport({

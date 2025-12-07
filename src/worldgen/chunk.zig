@@ -8,18 +8,14 @@ const newVec3 = @import("../util.zig").newVec3;
 const genChunk = @import("./gen.zig").genChunk;
 const World = @import("./world.zig").World;
 
+const Block = @import("../world/block.zig").Block;
+const Face = @import("../world/block.zig").Face;
+
 const gl = @cImport({
     @cInclude("glad/glad.h");
 });
 
 const cl = @import("cl").cl;
-
-pub const Block = enum {
-    Air,
-    Solid,
-};
-
-pub const Face = enum { NegY, PosY, NegX, PosX, NegZ, PosZ };
 
 pub const ChunkCoord = struct {
     x: i32,
@@ -31,14 +27,7 @@ pub const ChunkCoord = struct {
     }
 };
 
-const FACE_NORMALS = [_]Vec3{
-    newVec3(0, -1, 0), // NegY (bottom)
-    newVec3(0, 1, 0), // PosY (top)
-    newVec3(-1, 0, 0), // NegX (left)
-    newVec3(1, 0, 0), // PosX (right)
-    newVec3(0, 0, -1), // NegZ (back)
-    newVec3(0, 0, 1), // PosZ (front)
-};
+const FACE_NORMALS = [_]Vec3{};
 
 const FACE_INDICES = [_]u32{ 0, 1, 2, 0, 2, 3 };
 
@@ -100,8 +89,7 @@ pub const GreedyQuad = struct {
         face: Face,
         axis: u32,
     ) void {
-        const face_index = @intFromEnum(face);
-        const normal = FACE_NORMALS[face_index];
+        const normal = Face.normal(face);
 
         const fx = @as(f32, @floatFromInt(self.x));
         const fy = @as(f32, @floatFromInt(self.y));
