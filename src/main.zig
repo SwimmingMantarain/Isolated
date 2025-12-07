@@ -48,7 +48,6 @@ pub fn main() !void {
     };
 
     glfw.makeContextCurrent(w);
-    glfw.swapInterval(0);
 
     const loader = @as(gl.GLADloadproc, @ptrCast(&cglfw.glfwGetProcAddress));
     if (gl.gladLoadGLLoader(loader) == 0) {
@@ -77,6 +76,9 @@ pub fn main() !void {
 
     _ = imgui.cImGui_ImplOpenGL3_InitEx("#version 330");
     defer imgui.cImGui_ImplOpenGL3_Shutdown();
+
+    const style = imgui.ImGui_GetStyle();
+    style.*.WindowRounding = 6.0;
 
     // Opengl Shaders
     var shader = Shader.new();
@@ -200,12 +202,12 @@ pub fn main() !void {
         // Break & Place blocks
         if (config.break_block) {
             config.break_block = false;
-            world.break_block(&config.cam);
+            try world.break_block(&config.cam);
         }
 
         if (config.place_block) {
             config.place_block = false;
-            world.place_block(&config.cam);
+            try world.place_block(&config.cam);
         }
 
         // clear bg
@@ -246,16 +248,16 @@ pub fn main() !void {
             last_chunk_z = current_chunk_z;
         }
 
-        // sync generated meshes
-        world.done_mutex.?.lock();
-        while (world.done_queue.?.pop()) |chunk| {
-            if (chunk.state == .Destroying) {
-                chunk.destroy(alloc);
-            } else if (chunk.state == .Ready) {
-                chunk.uploadMesh();
+        // Upload any chunks that are ready
+        var it_upload = world.chunks.valueIterator();
+        while (it_upload.next()) |chunk_ptr_ptr| {
+            const chunk_ptr = chunk_ptr_ptr.*;
+            chunk_ptr.mutex.lock();
+            defer chunk_ptr.mutex.unlock();
+            if (chunk_ptr.state == .ToUpload) {
+                chunk_ptr.uploadMesh();
             }
         }
-        world.done_mutex.?.unlock();
 
         // chunks
         var it = world.chunks.valueIterator();
@@ -319,6 +321,8 @@ pub const Camera = struct {
 };
 
 const Config = struct {
+    fps: u32 = 60,
+    vsync: bool = true,
     wireframe: bool = false,
     v_was_pressed: bool = false,
     f_was_pressed: bool = false,
@@ -454,9 +458,26 @@ fn updateCamDir(cam: *Camera) void {
 }
 
 fn draw_gui(config: *Config, io: [*c]imgui.ImGuiIO_t) void {
-    _ = config;
-    _ = imgui.ImGui_Begin("Isolated", null, 0);
+    if (imgui.ImGui_Begin("Isolated", null, 0)) {
+        imgui.ImGui_Text("FPS (%.0f) POS (%.0f, %0.f, %0.f)", io.*.Framerate, config.cam.pos.x, config.cam.pos.y, config.cam.pos.z);
+        if (imgui.ImGui_BeginTabBar("bar", 0)) {
+            if (imgui.ImGui_BeginTabItem("General", null, 0)) {
+                imgui.ImGui_EndTabItem();
+            }
 
-    imgui.ImGui_Text("ms per: %.3f, FPS: %.1f", 1000.0 / io.*.Framerate, io.*.Framerate);
-    imgui.ImGui_End();
+            if (imgui.ImGui_BeginTabItem("Render", null, 0)) {
+                _ = imgui.ImGui_SliderInt("FPS", @ptrCast(&config.fps), 30, 120);
+                if (imgui.ImGui_Checkbox("V-Sync", @ptrCast(&config.vsync))) {
+                    if (config.vsync) {
+                        glfw.swapInterval(1);
+                    } else {
+                        glfw.swapInterval(0);
+                    }
+                }
+                imgui.ImGui_EndTabItem();
+            }
+            imgui.ImGui_EndTabBar();
+        }
+        imgui.ImGui_End();
+    }
 }

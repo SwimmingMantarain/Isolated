@@ -6,6 +6,8 @@ const noize = @import("noize");
 const Camera = @import("../main.zig").Camera;
 const ChunkCoord = @import("./chunk.zig").ChunkCoord;
 const Chunk = @import("./chunk.zig").Chunk;
+const ChunkJob = @import("./chunk.zig").ChunkJob;
+const Face = @import("./chunk.zig").Face;
 const meshWorker = @import("./chunk.zig").meshWorker;
 
 const gl = @cImport({
@@ -34,10 +36,9 @@ pub const World = struct {
     chunk_radius: u32 = 8,
 
     // multithreading shit
-    job_queue: ?std.ArrayList(*Chunk) = null,
+    chunks_mutex: std.Thread.Mutex = .{},
+    job_queue: ?std.ArrayList(ChunkJob) = null,
     job_mutex: ?std.Thread.Mutex = null,
-    done_queue: ?std.ArrayList(*Chunk) = null,
-    done_mutex: ?std.Thread.Mutex = null,
     worker_thread: ?std.Thread = null,
     worker_done: std.atomic.Value(bool) = .init(false),
 
@@ -65,30 +66,43 @@ pub const World = struct {
         self.gen = gen_ptr;
 
         self.job_mutex = .{};
-        self.done_mutex = .{};
-        self.job_queue = try .initCapacity(self.alloc, 30);
-        self.done_queue = try .initCapacity(self.alloc, 30);
-        self.worker_thread = try std.Thread.spawn(.{}, meshWorker, .{ &self.job_queue.?, &self.done_queue.?, &self.job_mutex.?, &self.done_mutex.?, &self.worker_done, self.cl_context, self.cl_queue, self.axis_kernel, self.cull_kernel, self.greedy_kernel, self.gen, self.alloc });
+        self.chunks_mutex = .{};
+        self.job_queue = try .initCapacity(self.alloc, 5);
+        self.worker_thread = try std.Thread.spawn(.{}, meshWorker, .{self});
     }
 
     pub fn deinit(self: *World) void {
         self.worker_done.store(true, .seq_cst);
         self.worker_thread.?.join();
+
+        for (self.job_queue.?.items) |job| {
+            for (job.chunks) |hash| {
+                const chunk = self.chunks.fetchRemove(hash).?.value;
+                chunk.destroy(self.alloc);
+            }
+        }
         self.job_queue.?.deinit(self.alloc);
-        self.done_queue.?.deinit(self.alloc);
+
         self.gen.deinit();
         self.alloc.destroy(self.gen);
+
         var it = self.chunks.valueIterator();
         while (it.next()) |chunk_ptr_ptr| {
             const chunk_ptr = chunk_ptr_ptr.*;
             chunk_ptr.destroy(self.alloc);
         }
+
         self.chunks.deinit();
     }
 
     pub fn load_chunks(self: *World, cam: *Camera) !void {
+        self.chunks_mutex.lock();
+        defer self.chunks_mutex.unlock();
+
         const cam_chunk_x: i32 = @intFromFloat(@floor(cam.pos.x / 32));
         const cam_chunk_z: i32 = @intFromFloat(@floor(cam.pos.z / 32));
+
+        var chunks = try std.ArrayList(u64).initCapacity(self.alloc, 64);
 
         var x: i32 = -@as(i32, @intCast(self.chunk_radius));
         while (x <= self.chunk_radius) : (x += 1) {
@@ -101,20 +115,35 @@ pub const World = struct {
 
                     chunk.state = .New;
 
-                    try self.job_queue.?.append(self.alloc, chunk);
-
                     try self.chunks.put(coords.hash(), chunk);
+                    try chunks.append(self.alloc, chunk.pos.hash());
                 }
             }
         }
+
+        if (chunks.items.len == 0) {
+            chunks.deinit(self.alloc);
+            return;
+        }
+
+        const job = ChunkJob{
+            .chunks = try chunks.toOwnedSlice(self.alloc),
+            .kind = .Generate,
+        };
+
+        self.job_mutex.?.lock();
+        defer self.job_mutex.?.unlock();
+        try self.job_queue.?.append(self.alloc, job);
     }
 
     pub fn unload_chunks(self: *World, cam: *Camera) !void {
+        self.chunks_mutex.lock();
+        defer self.chunks_mutex.unlock();
+
         const cam_chunk_x: i32 = @intFromFloat(@floor(cam.pos.x / 32));
         const cam_chunk_z: i32 = @intFromFloat(@floor(cam.pos.z / 32));
 
-        var to_rm = try std.ArrayList(u64).initCapacity(self.alloc, 20);
-        defer to_rm.deinit(self.alloc);
+        var chunks = try std.ArrayList(u64).initCapacity(self.alloc, 32);
 
         var it = self.chunks.iterator();
         while (it.next()) |entry| {
@@ -123,65 +152,128 @@ pub const World = struct {
             const dist_x = @abs(chunk_ptr.pos.x - cam_chunk_x);
             const dist_z = @abs(chunk_ptr.pos.z - cam_chunk_z);
 
-            if (dist_x > self.chunk_radius or dist_z > self.chunk_radius) try to_rm.append(self.alloc, entry.key_ptr.*);
-        }
-
-        for (to_rm.items) |hash| {
-            if (self.chunks.fetchRemove(hash)) |entry| {
-                const chunk = entry.value;
-
-                self.job_mutex.?.lock();
-                var found_in_queue = false;
-                var i: usize = 0;
-                while (i < self.job_queue.?.items.len) {
-                    if (self.job_queue.?.items[i] == chunk) {
-                        _ = self.job_queue.?.orderedRemove(i);
-                        found_in_queue = true;
-                        break;
-                    }
-                    i += 1;
-                }
-                self.job_mutex.?.unlock();
-
-                if (found_in_queue) {
-                    chunk.destroy(self.alloc);
-                    continue;
-                }
-
-                self.done_mutex.?.lock();
-                var found_in_done = false;
-                i = 0;
-                while (i < self.done_queue.?.items.len) {
-                    if (self.done_queue.?.items[i] == chunk) {
-                        _ = self.done_queue.?.orderedRemove(i);
-                        found_in_done = true;
-                        break;
-                    }
-                    i += 1;
-                }
-                self.done_mutex.?.unlock();
-
-                if (found_in_done) {
-                    chunk.destroy(self.alloc);
-                    continue;
-                }
-
-                chunk.mutex.lock();
-                switch (chunk.state) {
-                    .Idle, .New => {
-                        chunk.mutex.unlock();
-                        chunk.destroy(self.alloc);
-                    },
-                    else => {
-                        chunk.state = .Destroying;
-                        chunk.mutex.unlock();
-                    },
-                }
+            if (dist_x > self.chunk_radius or dist_z > self.chunk_radius and chunk_ptr.state == .Idle) {
+                try chunks.append(self.alloc, entry.key_ptr.*);
             }
         }
+
+        if (chunks.items.len == 0) {
+            chunks.deinit(self.alloc);
+            return;
+        }
+
+        // Collect valid neighbors for remeshing
+        var neighbour_set = std.AutoHashMap(u64, *Chunk).init(self.alloc);
+        defer neighbour_set.deinit();
+
+        for (chunks.items) |chunk| {
+            const neighbors = try self.get_neighbours(chunk);
+            for (neighbors) |maybe_neighbour| {
+                if (maybe_neighbour) |neighbour| {
+                    // Check if this neighbor is also being unloaded
+                    var being_unloaded = false;
+                    for (chunks.items) |c| {
+                        if (c == neighbour.pos.hash()) {
+                            being_unloaded = true;
+                            break;
+                        }
+                    }
+
+                    if (!being_unloaded) {
+                        try neighbour_set.put(neighbour.pos.hash(), neighbour);
+                    }
+                }
+            }
+            self.alloc.free(neighbors);
+        }
+
+        if (neighbour_set.count() > 0) {
+            var mesh_neighbours = try self.alloc.alloc(u64, neighbour_set.count());
+            var neighbour_it = neighbour_set.valueIterator();
+            var i: usize = 0;
+            while (neighbour_it.next()) |chunk_ptr| {
+                mesh_neighbours[i] = chunk_ptr.*.pos.hash();
+                chunk_ptr.*.state = .ToMesh;
+                i += 1;
+            }
+
+            const meshJob = ChunkJob{
+                .chunks = mesh_neighbours,
+                .kind = .Remesh,
+            };
+
+            self.job_mutex.?.lock();
+            try self.job_queue.?.append(self.alloc, meshJob);
+            self.job_mutex.?.unlock();
+        }
+
+        const job = ChunkJob{
+            .chunks = try chunks.toOwnedSlice(self.alloc),
+            .kind = .Destroy,
+        };
+
+        self.job_mutex.?.lock();
+        defer self.job_mutex.?.unlock();
+        try self.job_queue.?.append(self.alloc, job);
+    }
+
+    pub fn get_neighbours(self: *World, hash: u64) ![]?*Chunk {
+        var neighbours = try self.alloc.alloc(?*Chunk, 6);
+
+        const chunk = self.chunks.get(hash) orelse return neighbours;
+
+        if (chunk.state == .Destroying) return error.DestroyingChunk;
+
+        for (0..6) |face_idx| {
+            const face: Face = @enumFromInt(face_idx);
+
+            switch (face) {
+                .PosY => {
+                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x, .y = chunk.pos.y + 1, .z = chunk.pos.z };
+                    const chunk_ptr = self.chunks.get(neighbour_pos.hash());
+
+                    if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
+                },
+                .NegY => {
+                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x, .y = chunk.pos.y - 1, .z = chunk.pos.z };
+                    const chunk_ptr = self.chunks.get(neighbour_pos.hash());
+
+                    if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
+                },
+                .PosX => {
+                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x + 1, .y = chunk.pos.y, .z = chunk.pos.z };
+                    const chunk_ptr = self.chunks.get(neighbour_pos.hash());
+
+                    if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
+                },
+                .NegX => {
+                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x - 1, .y = chunk.pos.y, .z = chunk.pos.z };
+                    const chunk_ptr = self.chunks.get(neighbour_pos.hash());
+
+                    if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
+                },
+                .PosZ => {
+                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x, .y = chunk.pos.y, .z = chunk.pos.z + 1 };
+                    const chunk_ptr = self.chunks.get(neighbour_pos.hash());
+
+                    if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
+                },
+                .NegZ => {
+                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x, .y = chunk.pos.y, .z = chunk.pos.z - 1 };
+                    const chunk_ptr = self.chunks.get(neighbour_pos.hash());
+
+                    if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
+                },
+            }
+        }
+
+        return neighbours;
     }
 
     fn get_block(self: *World, cam: *Camera) ?Hit {
+        self.chunks_mutex.lock();
+        defer self.chunks_mutex.unlock();
+
         const ray_origin = cam.pos;
         const ray_dir = math.Vec3.sub(cam.target, cam.pos).normalize();
 
@@ -283,12 +375,16 @@ pub const World = struct {
         return null;
     }
 
-    pub fn break_block(self: *World, cam: *Camera) void {
+    pub fn break_block(self: *World, cam: *Camera) !void {
         const hit = self.get_block(cam);
         if (hit == null) return;
 
         var chunk_coords = hit.?.chunk_coords;
-        const chunk_ptr = self.chunks.get(chunk_coords.hash()) orelse return;
+        var chunk_ptr = blk: {
+            self.chunks_mutex.lock();
+            defer self.chunks_mutex.unlock();
+            break :blk self.chunks.get(chunk_coords.hash()) orelse return;
+        };
 
         chunk_ptr.mutex.lock();
         defer chunk_ptr.mutex.unlock();
@@ -296,35 +392,51 @@ pub const World = struct {
         chunk_ptr.blocks[hit.?.local_coords[1] + (32 * hit.?.local_coords[0]) + (32 * 32 * hit.?.local_coords[2])] = .Air;
 
         if (chunk_ptr.state == .Idle) {
-            chunk_ptr.state = .Queued;
+            chunk_ptr.state = .ToMesh;
+
+            const chunks = try self.alloc.alloc(u64, 1);
+            chunks[0] = chunk_ptr.pos.hash();
+
+            const job = ChunkJob{
+                .chunks = chunks,
+                .kind = .Remesh,
+            };
 
             self.job_mutex.?.lock();
-            self.job_queue.?.append(self.alloc, chunk_ptr) catch {
-                std.log.err("Failed to append mesh job to queue!", .{});
-            };
-            self.job_mutex.?.unlock();
+            defer self.job_mutex.?.unlock();
+            try self.job_queue.?.append(self.alloc, job);
         }
     }
 
-    pub fn place_block(self: *World, cam: *Camera) void {
+    pub fn place_block(self: *World, cam: *Camera) !void {
         const hit = self.get_block(cam);
         if (hit == null) return;
 
         var chunk_coords = hit.?.prev_chunk_coords;
-        const chunk_ptr = self.chunks.get(chunk_coords.hash()) orelse return;
+        var chunk_ptr = blk: {
+            self.chunks_mutex.lock();
+            defer self.chunks_mutex.unlock();
+            break :blk self.chunks.get(chunk_coords.hash()) orelse return;
+        };
 
         chunk_ptr.mutex.lock();
         defer chunk_ptr.mutex.unlock();
 
-        if (chunk_ptr.state == .Destroying) return;
-
         chunk_ptr.blocks[hit.?.prev_coords[1] + (32 * hit.?.prev_coords[0]) + (32 * 32 * hit.?.prev_coords[2])] = .Solid;
 
         if (chunk_ptr.state == .Idle) {
-            chunk_ptr.state = .Queued;
+            chunk_ptr.state = .ToMesh;
+
+            const chunks = try self.alloc.alloc(u64, 1);
+            chunks[0] = chunk_ptr.pos.hash();
+
+            const job = ChunkJob{
+                .chunks = chunks,
+                .kind = .Remesh,
+            };
 
             self.job_mutex.?.lock();
-            self.job_queue.?.append(self.alloc, chunk_ptr) catch {
+            self.job_queue.?.append(self.alloc, job) catch {
                 std.log.err("Failed to append mesh job to queue!", .{});
             };
             self.job_mutex.?.unlock();

@@ -6,7 +6,9 @@ const glfw = @import("glfw");
 const Chunk = @import("./chunk.zig").Chunk;
 
 pub const Biome = enum {
-    Forest, Desert, Mountain,
+    Forest,
+    Desert,
+    Mountain,
 };
 
 pub fn genChunk(chunk: *Chunk, gen: *noize.Gen) void {
@@ -14,10 +16,7 @@ pub fn genChunk(chunk: *Chunk, gen: *noize.Gen) void {
     const world_z_offset = chunk.pos.z * 32;
 
     // Biomes
-
-    const chunk_blends = gen.opencl.?.WorleyBlend32x32(
-        gen, Biome, world_x_offset, world_z_offset
-    ) catch |err| {
+    const chunk_blends = gen.opencl.?.WorleyBlend32x32(gen, Biome, world_x_offset, world_z_offset) catch |err| {
         std.log.err("Failed to run OpenCl biome gen: {s}", .{@errorName(err)});
         return;
     };

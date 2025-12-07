@@ -6,6 +6,7 @@ const Vec3 = @import("../util.zig").Vec3;
 const newVec3 = @import("../util.zig").newVec3;
 
 const genChunk = @import("./gen.zig").genChunk;
+const World = @import("./world.zig").World;
 
 const gl = @cImport({
     @cInclude("glad/glad.h");
@@ -18,16 +19,7 @@ pub const Block = enum {
     Solid,
 };
 
-pub const Face = enum { PosY, NegY, PosX, NegX, PosZ, NegZ };
-
-pub const ChunkState = enum {
-    Idle,
-    Queued,
-    Generating,
-    Ready,
-    New,
-    Destroying,
-};
+pub const Face = enum { NegY, PosY, NegX, PosX, NegZ, PosZ };
 
 pub const ChunkCoord = struct {
     x: i32,
@@ -40,12 +32,12 @@ pub const ChunkCoord = struct {
 };
 
 const FACE_NORMALS = [_]Vec3{
-    newVec3(0, 1, 0), // PosY (top)
     newVec3(0, -1, 0), // NegY (bottom)
-    newVec3(1, 0, 0), // PosX (right)
+    newVec3(0, 1, 0), // PosY (top)
     newVec3(-1, 0, 0), // NegX (left)
-    newVec3(0, 0, 1), // PosZ (front)
+    newVec3(1, 0, 0), // PosX (right)
     newVec3(0, 0, -1), // NegZ (back)
+    newVec3(0, 0, 1), // PosZ (front)
 };
 
 const FACE_INDICES = [_]u32{ 0, 1, 2, 0, 2, 3 };
@@ -160,6 +152,7 @@ pub const GreedyQuad = struct {
 
 pub const Chunk = struct {
     blocks: [32 * 32 * 32]Block,
+    border_data: [6 * 32 * 32]Block,
     front_mesh: *ChunkMesh,
     back_mesh: *ChunkMesh,
     pos: ChunkCoord,
@@ -206,22 +199,26 @@ pub const Chunk = struct {
     }
 
     pub fn generate(self: *Chunk, gen: *noize.Gen) void {
+        self.mutex.lock();
         genChunk(self, gen);
+        self.state = .ToMesh;
+        self.mutex.unlock();
     }
 
     pub fn buildMesh(
         self: *Chunk,
         alloc: std.mem.Allocator,
+        neighbours: []?*Chunk,
+        cl_context: cl.cl_context,
         cl_queue: cl.cl_command_queue,
         axis_kernel: cl.cl_kernel,
         cull_kernel: cl.cl_kernel,
         greedy_kernel: cl.cl_kernel,
-        blocks_mem: cl.cl_mem,
-        axis_cols_mem: cl.cl_mem,
-        col_face_masks_mem: cl.cl_mem,
-        out_planes_mem: cl.cl_mem,
     ) !void {
-        self.state = .Generating;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.state = .Meshing;
 
         self.back_mesh.vertices.clearRetainingCapacity();
         self.back_mesh.indices.clearRetainingCapacity();
@@ -229,13 +226,41 @@ pub const Chunk = struct {
         try self.back_mesh.vertices.ensureTotalCapacity(alloc, 8192);
         try self.back_mesh.indices.ensureTotalCapacity(alloc, 8192 * 6);
 
+        var err: cl.cl_int = undefined;
+        const blocks_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_READ_ONLY, 32 * 32 * 32 * @sizeOf(u8), null, &err);
+        if (err != cl.CL_SUCCESS) {
+            std.log.err("Failed to create blocks buffer: {}", .{err});
+            return error.OpenCLBufferCreationFailed;
+        }
+        defer _ = cl.clReleaseMemObject(blocks_mem);
+
+        const axis_cols_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 3 * 32 * 32 * @sizeOf(u32), null, &err);
+        if (err != cl.CL_SUCCESS) {
+            std.log.err("Failed to create axis_cols buffer: {}", .{err});
+            return error.OpenCLBufferCreationFailed;
+        }
+        defer _ = cl.clReleaseMemObject(axis_cols_mem);
+
+        const col_face_masks_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_READ_WRITE, 6 * 32 * 32 * @sizeOf(u32), null, &err);
+        if (err != cl.CL_SUCCESS) {
+            std.log.err("Failed to create col_face_masks buffer: {}", .{err});
+            return error.OpenCLBufferCreationFailed;
+        }
+        defer _ = cl.clReleaseMemObject(col_face_masks_mem);
+
+        const out_planes_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 6 * 32 * 32 * @sizeOf(u32), null, &err);
+        if (err != cl.CL_SUCCESS) {
+            std.log.err("Failed to create out planes buffer: {}", .{err});
+            return error.OpenCLBufferCreationFailed;
+        }
+        defer _ = cl.clReleaseMemObject(out_planes_mem);
+
         // Binary representation for each axis
         // axis_cols[axis][z][x] where axis: 0=Y, 1=X, 2=Z
         var axis_cols: [3 * 32 * 32]u32 = undefined;
         @memset(&axis_cols, 0);
 
         // Upload blocks directly to GPU (Block enum is u8, same as kernel input)
-        var err: cl.cl_int = undefined;
         err = cl.clEnqueueWriteBuffer(cl_queue, blocks_mem, cl.CL_TRUE, // blocking write
             0, 32 * 32 * 32 * @sizeOf(u8), &self.blocks, 0, null, null);
         if (err != cl.CL_SUCCESS) {
@@ -362,6 +387,69 @@ pub const Chunk = struct {
             return error.OpenCLBufferReadFailed;
         }
 
+        // Border control
+        for (0..6) |face_idx| {
+            const face: Face = @enumFromInt(face_idx);
+
+            if (neighbours[face_idx]) |neighbour| {
+                const opposites = [_]Face{
+                    .PosY, .NegY,
+                    .PosX, .NegX,
+                    .PosZ, .NegZ,
+                };
+
+                const opposite_face = opposites[face_idx];
+
+                neighbour.mutex.lock();
+                const neighbour_border = neighbour.getBorderFace(opposite_face);
+                neighbour.mutex.unlock();
+
+                const face_base = face_idx * 32 * 32;
+                const axis = face_idx / 2; // 0 = Y, 1 = X, 2 = Z
+
+                var neighbour_cols: [32 * 32]u32 = undefined;
+                @memset(&neighbour_cols, 0);
+
+                if (axis == 0) { // Y
+                    for (0..32) |x| {
+                        for (0..32) |z| {
+                            const border_idx = x * 32 + z;
+                            if (neighbour_border[border_idx] == .Solid) {
+                                const bit_pos: u5 = if (face == .PosY) 31 else 0;
+                                neighbour_cols[z * 32 + x] |= (@as(u32, 1) << bit_pos);
+                            }
+                        }
+                    }
+                } else if (axis == 1) { // X
+                    for (0..32) |y| {
+                        for (0..32) |z| {
+                            const border_idx = y * 32 + z;
+                            if (neighbour_border[border_idx] == .Solid) {
+                                const bit_pos: u5 = if (face == .PosX) 31 else 0;
+                                neighbour_cols[y * 32 + z] |= (@as(u32, 1) << bit_pos);
+                            }
+                        }
+                    }
+                } else { // Z
+                    for (0..32) |y| {
+                        for (0..32) |x| {
+                            const border_idx = y * 32 + x;
+                            if (neighbour_border[border_idx] == .Solid) {
+                                const bit_pos: u5 = if (face == .PosZ) 31 else 0;
+                                neighbour_cols[y * 32 + x] |= (@as(u32, 1) << bit_pos);
+                            }
+                        }
+                    }
+                }
+
+                for (0..32 * 32) |i| {
+                    col_face_masks[face_base + i] &= ~neighbour_cols[i];
+                }
+            }
+        }
+
+        alloc.free(neighbours);
+
         // Create planes for greedy meshing
         var planes: [6 * 32 * 32]u32 = undefined;
         @memset(&planes, 0);
@@ -463,32 +551,32 @@ pub const Chunk = struct {
             }
         }
 
-        self.state = .Ready;
+        self.state = .ToUpload;
     }
 
     pub fn uploadMesh(self: *Chunk) void {
-        const temp_mesh = self.front_mesh;
-        self.front_mesh = self.back_mesh;
-        self.back_mesh = temp_mesh;
+        self.state = .Uploading;
 
-        if (self.front_mesh.vao_handle == 0) gl.glGenVertexArrays(1, &self.front_mesh.vao_handle);
-        gl.glBindVertexArray(self.front_mesh.vao_handle);
+        const new_mesh = self.back_mesh;
 
-        if (self.front_mesh.vbo_handle == 0) gl.glGenBuffers(1, &self.front_mesh.vbo_handle);
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.front_mesh.vbo_handle);
+        if (new_mesh.vao_handle == 0) gl.glGenVertexArrays(1, &new_mesh.vao_handle);
+        gl.glBindVertexArray(new_mesh.vao_handle);
+
+        if (new_mesh.vbo_handle == 0) gl.glGenBuffers(1, &new_mesh.vbo_handle);
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, new_mesh.vbo_handle);
         gl.glBufferData(
             gl.GL_ARRAY_BUFFER,
-            @intCast(self.front_mesh.vertices.items.len * @sizeOf(Vertex)),
-            self.front_mesh.vertices.items.ptr,
+            @intCast(new_mesh.vertices.items.len * @sizeOf(Vertex)),
+            new_mesh.vertices.items.ptr,
             gl.GL_DYNAMIC_DRAW,
         );
 
-        if (self.front_mesh.ebo_handle == 0) gl.glGenBuffers(1, &self.front_mesh.ebo_handle);
-        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.front_mesh.ebo_handle);
+        if (new_mesh.ebo_handle == 0) gl.glGenBuffers(1, &new_mesh.ebo_handle);
+        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, new_mesh.ebo_handle);
         gl.glBufferData(
             gl.GL_ELEMENT_ARRAY_BUFFER,
-            @intCast(self.front_mesh.indices.items.len * @sizeOf(u32)),
-            self.front_mesh.indices.items.ptr,
+            @intCast(new_mesh.indices.items.len * @sizeOf(u32)),
+            new_mesh.indices.items.ptr,
             gl.GL_DYNAMIC_DRAW,
         );
 
@@ -500,7 +588,86 @@ pub const Chunk = struct {
         gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(3 * @sizeOf(f32)));
         gl.glEnableVertexAttribArray(1);
 
+        const temp_mesh = self.front_mesh;
+        self.front_mesh = new_mesh;
+        self.back_mesh = temp_mesh;
+
         self.state = .Idle;
+    }
+
+    pub fn updateBorders(self: *Chunk) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        @memset(&self.border_data, .Air);
+
+        for (0..6) |face_idx| {
+            const face: Face = @enumFromInt(face_idx);
+            const face_base = face_idx * 32 * 32;
+
+            switch (face) {
+                .PosY => {
+                    for (0..32) |x| {
+                        for (0..32) |z| {
+                            const block_idx = 31 + (x * 32) + (32 * 32 * z);
+                            const border_idx = face_base + (x * 32) + z;
+                            self.border_data[border_idx] = self.blocks[block_idx];
+                        }
+                    }
+                },
+                .NegY => {
+                    for (0..32) |x| {
+                        for (0..32) |z| {
+                            const block_idx = 0 + (x * 32) + (32 * 32 * z);
+                            const border_idx = face_base + (x * 32) + z;
+                            self.border_data[border_idx] = self.blocks[block_idx];
+                        }
+                    }
+                },
+                .PosX => {
+                    for (0..32) |y| {
+                        for (0..32) |z| {
+                            const block_idx = y + (31 * 32) + (32 * 32 * z);
+                            const border_idx = face_base + (y * 32) + z;
+                            self.border_data[border_idx] = self.blocks[block_idx];
+                        }
+                    }
+                },
+                .NegX => {
+                    for (0..32) |y| {
+                        for (0..32) |z| {
+                            const block_idx = y + (0 * 32) + (32 * 32 * z);
+                            const border_idx = face_base + (y * 32) + z;
+                            self.border_data[border_idx] = self.blocks[block_idx];
+                        }
+                    }
+                },
+                .PosZ => {
+                    for (0..32) |y| {
+                        for (0..32) |x| {
+                            const block_idx = y + (x * 32) + (31 * 32 * 32);
+                            const border_idx = face_base + (y * 32) + x;
+                            self.border_data[border_idx] = self.blocks[block_idx];
+                        }
+                    }
+                },
+                .NegZ => {
+                    for (0..32) |y| {
+                        for (0..32) |x| {
+                            const block_idx = y + (x * 32) + (0 * 32 * 32);
+                            const border_idx = face_base + (y * 32) + x;
+                            self.border_data[border_idx] = self.blocks[block_idx];
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    pub fn getBorderFace(self: *Chunk, face: Face) []Block {
+        const face_idx: usize = @intFromEnum(face);
+        const face_base: usize = face_idx * 32 * 32;
+        return self.border_data[face_base .. face_base + 32 * 32];
     }
 };
 
@@ -542,72 +709,149 @@ fn greedyMeshBinaryPlane(data: *[32]u32, quads: *std.ArrayList(GreedyQuad), allo
     }
 }
 
-pub fn meshWorker(jobs: *std.ArrayList(*Chunk), done: *std.ArrayList(*Chunk), job_mutex: *std.Thread.Mutex, done_mutex: *std.Thread.Mutex, should_stop: *std.atomic.Value(bool), cl_context: cl.cl_context, cl_queue: cl.cl_command_queue, axis_kernel: cl.cl_kernel, cull_kernel: cl.cl_kernel, greedy_kernel: cl.cl_kernel, gen: *noize.Gen, alloc: std.mem.Allocator) !void {
-    var err: cl.cl_int = undefined;
-    const blocks_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_READ_ONLY, 32 * 32 * 32 * @sizeOf(u8), null, &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create blocks buffer: {}", .{err});
-        return error.OpenCLBufferCreationFailed;
-    }
-    defer _ = cl.clReleaseMemObject(blocks_mem);
+pub const ChunkState = enum {
+    Idle,
+    New,
+    ToMesh,
+    ToUpload,
+    Meshing,
+    Uploading,
+    Generating,
+    Destroying,
+};
 
-    const axis_cols_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 3 * 32 * 32 * @sizeOf(u32), null, &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create axis_cols buffer: {}", .{err});
-        return error.OpenCLBufferCreationFailed;
-    }
-    defer _ = cl.clReleaseMemObject(axis_cols_mem);
+pub const Job = enum {
+    Generate,
+    Remesh,
+    UpdateBorders,
+    Destroy,
+};
 
-    const col_face_masks_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_READ_WRITE, 6 * 32 * 32 * @sizeOf(u32), null, &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create col_face_masks buffer: {}", .{err});
-        return error.OpenCLBufferCreationFailed;
-    }
-    defer _ = cl.clReleaseMemObject(col_face_masks_mem);
+pub const ChunkJob = struct {
+    chunks: []u64, // chunk hashes
+    kind: Job,
+};
 
-    const out_planes_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 6 * 32 * 32 * @sizeOf(u32), null, &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create out planes buffer: {}", .{err});
-        return error.OpenCLBufferCreationFailed;
-    }
-    defer _ = cl.clReleaseMemObject(out_planes_mem);
+pub fn meshWorker(
+    world: *World,
+) !void {
+    while (!world.worker_done.load(.acquire)) {
+        world.job_mutex.?.lock();
+        const maybe_job = if (world.job_queue.?.items.len > 0) world.job_queue.?.orderedRemove(0) else null;
+        world.job_mutex.?.unlock();
 
-    while (!should_stop.*.raw) {
-        job_mutex.lock();
-        const maybe_chunk = if (jobs.items.len > 0) jobs.pop() else null;
-        job_mutex.unlock();
+        if (maybe_job) |job| {
+            if (job.kind == .Generate) {
+                for (job.chunks) |hash| {
+                    const chunk = world.chunks.get(hash);
+                    if (chunk != null) chunk.?.generate(world.gen);
+                }
 
-        if (maybe_chunk) |chunk| {
-            chunk.mutex.lock();
-            if (chunk.state == .Destroying) {
-                chunk.mutex.unlock();
-                chunk.destroy(alloc);
-                continue;
-            }
-
-            if (chunk.state == .New) {
-                chunk.generate(gen);
-                chunk.state = .Queued;
-            }
-            chunk.mutex.unlock();
-
-            chunk.mutex.lock();
-            if (chunk.state == .Destroying) {
-                chunk.mutex.unlock();
-                chunk.destroy(alloc);
-                continue;
-            }
-
-            if (chunk.state == .Queued) {
-                chunk.buildMesh(alloc, cl_queue, axis_kernel, cull_kernel, greedy_kernel, blocks_mem, axis_cols_mem, col_face_masks_mem, out_planes_mem) catch |build_err| {
-                    std.log.err("Failed to build mesh: {}", .{build_err});
+                const borderJob = ChunkJob{
+                    .chunks = job.chunks,
+                    .kind = .UpdateBorders,
                 };
-            }
-            chunk.mutex.unlock();
 
-            done_mutex.lock();
-            try done.append(alloc, chunk);
-            done_mutex.unlock();
+                world.job_mutex.?.lock();
+                defer world.job_mutex.?.unlock();
+                try world.job_queue.?.append(world.alloc, borderJob);
+            } else if (job.kind == .UpdateBorders) {
+                for (job.chunks) |hash| {
+                    const chunk = world.chunks.get(hash);
+                    if (chunk != null) chunk.?.updateBorders();
+                }
+
+                const meshJob = ChunkJob{
+                    .chunks = job.chunks,
+                    .kind = .Remesh,
+                };
+
+                // Collect valid neighbors for remeshing
+                var neighbour_set = std.AutoHashMap(u64, *Chunk).init(world.alloc);
+                defer neighbour_set.deinit();
+
+                world.chunks_mutex.lock();
+                for (job.chunks) |hash| {
+                    const chunk = world.chunks.get(hash);
+                    if (chunk == null) continue;
+
+                    const neighbours = try world.get_neighbours(chunk.?.pos.hash());
+                    for (neighbours) |maybe_neighbour| {
+                        if (maybe_neighbour) |neighbour| {
+                            var in_job = false;
+                            for (job.chunks) |hashh| {
+                                if (hashh == neighbour.pos.hash()) {
+                                    in_job = true;
+                                    break;
+                                }
+                            }
+
+                            if (!in_job) {
+                                try neighbour_set.put(neighbour.pos.hash(), neighbour);
+                            }
+                        }
+                    }
+                    world.alloc.free(neighbours);
+                }
+                world.chunks_mutex.unlock();
+
+                if (neighbour_set.count() > 0) {
+                    var mesh_neighbours = try world.alloc.alloc(u64, neighbour_set.count());
+                    var it = neighbour_set.valueIterator();
+                    var i: usize = 0;
+                    while (it.next()) |chunk_ptr| {
+                        mesh_neighbours[i] = chunk_ptr.*.pos.hash();
+                        chunk_ptr.*.state = .ToMesh;
+                        i += 1;
+                    }
+
+                    const pendingMeshJob = ChunkJob{
+                        .chunks = mesh_neighbours,
+                        .kind = .Remesh,
+                    };
+
+                    world.job_mutex.?.lock();
+                    try world.job_queue.?.append(world.alloc, pendingMeshJob);
+                    world.job_mutex.?.unlock();
+                }
+
+                world.job_mutex.?.lock();
+                defer world.job_mutex.?.unlock();
+                try world.job_queue.?.append(world.alloc, meshJob);
+            } else if (job.kind == .Remesh) {
+                for (job.chunks) |hash| {
+                    world.chunks_mutex.lock();
+                    const chunk = world.chunks.get(hash);
+                    if (chunk == null) {
+                        world.chunks_mutex.unlock();
+                        continue;
+                    }
+                    const neighbours = try world.get_neighbours(chunk.?.pos.hash());
+                    world.chunks_mutex.unlock();
+
+                    try chunk.?.buildMesh(
+                        world.alloc,
+                        neighbours,
+                        world.cl_context,
+                        world.cl_queue,
+                        world.axis_kernel,
+                        world.cull_kernel,
+                        world.greedy_kernel,
+                    );
+                }
+
+                world.alloc.free(job.chunks);
+            } else { // destroy
+                for (job.chunks) |hash| {
+                    const kv = world.chunks.fetchRemove(hash) orelse continue;
+                    const chunk = kv.value;
+                    chunk.mutex.lock(); // wait until someone is done
+                    chunk.mutex.unlock();
+                    chunk.destroy(world.alloc);
+                }
+
+                world.alloc.free(job.chunks);
+            }
         } else {
             std.Thread.sleep(5 * std.time.ns_per_ms);
         }
