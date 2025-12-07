@@ -10,10 +10,8 @@ const World = @import("./world.zig").World;
 
 const Block = @import("../world/block.zig").Block;
 const Face = @import("../world/block.zig").Face;
-
-const gl = @cImport({
-    @cInclude("glad/glad.h");
-});
+const ChunkMesh = @import("../world/mesh.zig").ChunkMesh;
+const Vertex = @import("../world/mesh.zig").Vertex;
 
 const cl = @import("cl").cl;
 
@@ -37,44 +35,6 @@ const BIT_MASKS: [32]u32 = blk: {
         arr[i] = @as(u32, @intCast(1)) << i;
     }
     break :blk arr;
-};
-
-const Vertex = packed struct {
-    pos: Vec3,
-    norm: Vec3,
-};
-
-pub const ChunkMesh = struct {
-    vertices: std.ArrayListUnmanaged(Vertex),
-    indices: std.ArrayListUnmanaged(u32),
-    vao_handle: c_uint,
-    vbo_handle: c_uint,
-    ebo_handle: c_uint,
-
-    pub fn create(alloc: std.mem.Allocator) !*ChunkMesh {
-        const mesh_ptr = alloc.create(ChunkMesh) catch |err| {
-            std.log.err("Failed to allocate memory for new chunk mesh", .{});
-            return err;
-        };
-
-        mesh_ptr.vertices = try .initCapacity(alloc, 8192);
-        mesh_ptr.indices = try .initCapacity(alloc, 8192 * 6);
-        mesh_ptr.vao_handle = 0;
-        mesh_ptr.vbo_handle = 0;
-        mesh_ptr.ebo_handle = 0;
-
-        return mesh_ptr;
-    }
-
-    pub fn destroy(self: *ChunkMesh, alloc: std.mem.Allocator) void {
-        gl.glDeleteVertexArrays(1, &self.vao_handle);
-        gl.glDeleteBuffers(1, &self.vbo_handle);
-        gl.glDeleteBuffers(1, &self.ebo_handle);
-
-        self.vertices.deinit(alloc);
-        self.indices.deinit(alloc);
-        alloc.destroy(self);
-    }
 };
 
 pub const GreedyQuad = struct {
@@ -543,44 +503,17 @@ pub const Chunk = struct {
     }
 
     pub fn uploadMesh(self: *Chunk) void {
+        self.mutex.lock();
         self.state = .Uploading;
 
-        const new_mesh = self.back_mesh;
-
-        if (new_mesh.vao_handle == 0) gl.glGenVertexArrays(1, &new_mesh.vao_handle);
-        gl.glBindVertexArray(new_mesh.vao_handle);
-
-        if (new_mesh.vbo_handle == 0) gl.glGenBuffers(1, &new_mesh.vbo_handle);
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, new_mesh.vbo_handle);
-        gl.glBufferData(
-            gl.GL_ARRAY_BUFFER,
-            @intCast(new_mesh.vertices.items.len * @sizeOf(Vertex)),
-            new_mesh.vertices.items.ptr,
-            gl.GL_DYNAMIC_DRAW,
-        );
-
-        if (new_mesh.ebo_handle == 0) gl.glGenBuffers(1, &new_mesh.ebo_handle);
-        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, new_mesh.ebo_handle);
-        gl.glBufferData(
-            gl.GL_ELEMENT_ARRAY_BUFFER,
-            @intCast(new_mesh.indices.items.len * @sizeOf(u32)),
-            new_mesh.indices.items.ptr,
-            gl.GL_DYNAMIC_DRAW,
-        );
-
-        // vertices
-        gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), null);
-        gl.glEnableVertexAttribArray(0);
-
-        // normals
-        gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(3 * @sizeOf(f32)));
-        gl.glEnableVertexAttribArray(1);
+        self.back_mesh.upload();
 
         const temp_mesh = self.front_mesh;
-        self.front_mesh = new_mesh;
+        self.front_mesh = self.back_mesh;
         self.back_mesh = temp_mesh;
 
         self.state = .Idle;
+        self.mutex.unlock();
     }
 
     pub fn updateBorders(self: *Chunk) void {

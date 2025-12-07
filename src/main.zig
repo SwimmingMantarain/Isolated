@@ -252,8 +252,6 @@ pub fn main() !void {
         var it_upload = world.chunks.valueIterator();
         while (it_upload.next()) |chunk_ptr_ptr| {
             const chunk_ptr = chunk_ptr_ptr.*;
-            chunk_ptr.mutex.lock();
-            defer chunk_ptr.mutex.unlock();
             if (chunk_ptr.state == .ToUpload) {
                 chunk_ptr.uploadMesh();
             }
@@ -274,7 +272,7 @@ pub fn main() !void {
             gl.glUniformMatrix4fv(modelUni, 1, gl.GL_FALSE, &model_flat);
 
             // Draw chunk
-            gl.glBindVertexArray(chunk_ptr.front_mesh.vao_handle);
+            gl.glBindVertexArray(chunk_ptr.front_mesh.vao);
             gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk_ptr.front_mesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
         }
         gl.glBindVertexArray(0);
