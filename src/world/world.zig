@@ -399,7 +399,7 @@ pub const World = struct {
 
             const job = ChunkJob{
                 .chunks = chunks,
-                .kind = .Remesh,
+                .kind = .UpdateBorders,
             };
 
             self.job_mutex.?.lock();
@@ -432,7 +432,7 @@ pub const World = struct {
 
             const job = ChunkJob{
                 .chunks = chunks,
-                .kind = .Remesh,
+                .kind = .UpdateBorders,
             };
 
             self.job_mutex.?.lock();

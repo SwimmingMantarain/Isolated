@@ -6,7 +6,7 @@ pub const Vec3 = packed struct {
     z: f32,
 };
 
-pub const iVec3 = packed struct {
+pub const iVec3 = struct {
     x: i32,
     y: i32,
     z: i32,

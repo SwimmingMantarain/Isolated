@@ -280,7 +280,7 @@ pub const Chunk = struct {
                             const border_idx = x * 32 + z;
                             if (neighbour_border[border_idx] == .Solid) {
                                 const bit_pos: u5 = if (face == .PosY) 31 else 0;
-                                neighbour_cols[z * 32 + x] |= (@as(u32, 1) << bit_pos);
+                                neighbour_cols[x * 32 + z] |= (@as(u32, 1) << bit_pos);
                             }
                         }
                     }
@@ -415,7 +415,6 @@ pub const Chunk = struct {
     }
 
     pub fn uploadMesh(self: *Chunk) void {
-        self.mutex.lock();
         self.state = .Uploading;
 
         self.bmesh.upload();
@@ -425,7 +424,6 @@ pub const Chunk = struct {
         self.bmesh = tmesh;
 
         self.state = .Idle;
-        self.mutex.unlock();
     }
 
     pub fn updateBorders(self: *Chunk) void {

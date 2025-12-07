@@ -67,7 +67,8 @@ pub fn main() !void {
     defer imgui.ImGui_DestroyContext(null);
 
     const imio = imgui.ImGui_GetIO();
-    imio.*.ConfigFlags = imgui.ImGuiConfigFlags_NavEnableKeyboard;
+    imio.*.ConfigFlags |= imgui.ImGuiConfigFlags_NavEnableKeyboard;
+    imio.*.ConfigFlags |= imgui.ImGuiConfigFlags_DockingEnable;
 
     imgui.ImGui_StyleColorsDark(null);
 
@@ -252,9 +253,11 @@ pub fn main() !void {
         var it_upload = world.chunks.valueIterator();
         while (it_upload.next()) |chunk_ptr_ptr| {
             const chunk_ptr = chunk_ptr_ptr.*;
+            chunk_ptr.mutex.lock();
             if (chunk_ptr.state == .ToUpload) {
                 chunk_ptr.uploadMesh();
             }
+            chunk_ptr.mutex.unlock();
         }
 
         // chunks
@@ -476,6 +479,6 @@ fn draw_gui(config: *Config, io: [*c]imgui.ImGuiIO_t) void {
             }
             imgui.ImGui_EndTabBar();
         }
-        imgui.ImGui_End();
     }
+    imgui.ImGui_End();
 }
