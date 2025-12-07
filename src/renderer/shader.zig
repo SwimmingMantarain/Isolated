@@ -69,5 +69,3 @@ pub const Shader = struct {
         gl.glUseProgram(self.id);
     }
 };
-
-

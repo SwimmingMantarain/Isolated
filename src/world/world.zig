@@ -5,9 +5,9 @@ const noize = @import("noize");
 
 const Camera = @import("../main.zig").Camera;
 const Chunk = @import("../world/chunk.zig").Chunk;
-const ChunkJob = @import("./chunk.zig").ChunkJob;
+const ChunkJob = @import("../threading/worker.zig").ChunkJob;
 const Face = @import("../world/block.zig").Face;
-const meshWorker = @import("./chunk.zig").meshWorker;
+const meshWorker = @import("../threading/worker.zig").meshWorker;
 const iVec3 = @import("../util.zig").iVec3;
 
 const gl = @cImport({

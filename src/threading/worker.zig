@@ -5,8 +5,8 @@ const noize = @import("noize");
 const Vec3 = @import("../util.zig").Vec3;
 const newVec3 = @import("../util.zig").newVec3;
 
-const genChunk = @import("./gen.zig").genChunk;
-const World = @import("./world.zig").World;
+const genChunk = @import("../worldgen/gen.zig").genChunk;
+const World = @import("../world/world.zig").World;
 
 const Block = @import("../world/block.zig").Block;
 const Face = @import("../world/block.zig").Face;

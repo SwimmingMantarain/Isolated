@@ -3,8 +3,8 @@ const math = @import("zlm").as(f32);
 const glfw = @import("glfw");
 const noize = @import("noize");
 
-const Shader = @import("./shader.zig").Shader;
-const World = @import("./worldgen/world.zig").World;
+const Shader = @import("./renderer/shader.zig").Shader;
+const World = @import("./world/world.zig").World;
 
 const cglfw = @cImport({
     @cInclude("GLFW/glfw3.h");
