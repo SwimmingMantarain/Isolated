@@ -3,11 +3,11 @@ const std = @import("std");
 const Block = @import("./block.zig").Block;
 const Face = @import("./block.zig").Face;
 const ChunkMesh = @import("./mesh.zig").ChunkMesh;
-const GreedyQuad = @import("../worldgen/chunk.zig").GreedyQuad;
+const GreedyQuad = @import("../meshing/greedy.zig").GreedyQuad;
 const iVec3 = @import("../util.zig").iVec3;
 const Gen = @import("noize").Gen;
 
-const greedyMeshBinaryPlane = @import("../worldgen/chunk.zig").greedyMeshBinaryPlane;
+const greedyMeshBinaryPlane = @import("../meshing/greedy.zig").greedyMeshBinaryPlane;
 const genChunk = @import("../worldgen/gen.zig").genChunk;
 
 const cl = @import("cl").cl;
