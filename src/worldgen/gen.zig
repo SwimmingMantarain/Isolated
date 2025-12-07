@@ -3,7 +3,7 @@ const noize = @import("noize");
 const cl = @import("cl").cl;
 const glfw = @import("glfw");
 
-const Chunk = @import("./chunk.zig").Chunk;
+const Chunk = @import("../world/chunk.zig").Chunk;
 
 pub const Biome = enum {
     Forest,

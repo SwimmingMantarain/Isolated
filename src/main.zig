@@ -272,8 +272,8 @@ pub fn main() !void {
             gl.glUniformMatrix4fv(modelUni, 1, gl.GL_FALSE, &model_flat);
 
             // Draw chunk
-            gl.glBindVertexArray(chunk_ptr.front_mesh.vao);
-            gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk_ptr.front_mesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
+            gl.glBindVertexArray(chunk_ptr.fmesh.vao);
+            gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk_ptr.fmesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
         }
         gl.glBindVertexArray(0);
 

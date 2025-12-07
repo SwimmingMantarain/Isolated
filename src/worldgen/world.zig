@@ -4,11 +4,11 @@ const glfw = @import("glfw");
 const noize = @import("noize");
 
 const Camera = @import("../main.zig").Camera;
-const ChunkCoord = @import("./chunk.zig").ChunkCoord;
-const Chunk = @import("./chunk.zig").Chunk;
+const Chunk = @import("../world/chunk.zig").Chunk;
 const ChunkJob = @import("./chunk.zig").ChunkJob;
 const Face = @import("../world/block.zig").Face;
 const meshWorker = @import("./chunk.zig").meshWorker;
+const iVec3 = @import("../util.zig").iVec3;
 
 const gl = @cImport({
     @cInclude("glad/glad.h");
@@ -17,8 +17,8 @@ const gl = @cImport({
 const cl = @import("cl").cl;
 
 const Hit = struct {
-    chunk_coords: ChunkCoord,
-    prev_chunk_coords: ChunkCoord,
+    chunk_coords: iVec3,
+    prev_chunk_coords: iVec3,
     local_coords: [3]usize,
     prev_coords: [3]usize,
 };
@@ -108,7 +108,7 @@ pub const World = struct {
         while (x <= self.chunk_radius) : (x += 1) {
             var z: i32 = -@as(i32, @intCast(self.chunk_radius));
             while (z <= self.chunk_radius) : (z += 1) {
-                var coords = ChunkCoord{ .x = cam_chunk_x + x, .y = 0, .z = cam_chunk_z + z };
+                var coords = iVec3{ .x = cam_chunk_x + x, .y = 0, .z = cam_chunk_z + z };
 
                 if (self.chunks.get(coords.hash()) == null) {
                     const chunk = try Chunk.create(self.alloc, coords);
@@ -229,37 +229,37 @@ pub const World = struct {
 
             switch (face) {
                 .PosY => {
-                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x, .y = chunk.pos.y + 1, .z = chunk.pos.z };
+                    var neighbour_pos = iVec3{ .x = chunk.pos.x, .y = chunk.pos.y + 1, .z = chunk.pos.z };
                     const chunk_ptr = self.chunks.get(neighbour_pos.hash());
 
                     if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
                 },
                 .NegY => {
-                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x, .y = chunk.pos.y - 1, .z = chunk.pos.z };
+                    var neighbour_pos = iVec3{ .x = chunk.pos.x, .y = chunk.pos.y - 1, .z = chunk.pos.z };
                     const chunk_ptr = self.chunks.get(neighbour_pos.hash());
 
                     if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
                 },
                 .PosX => {
-                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x + 1, .y = chunk.pos.y, .z = chunk.pos.z };
+                    var neighbour_pos = iVec3{ .x = chunk.pos.x + 1, .y = chunk.pos.y, .z = chunk.pos.z };
                     const chunk_ptr = self.chunks.get(neighbour_pos.hash());
 
                     if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
                 },
                 .NegX => {
-                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x - 1, .y = chunk.pos.y, .z = chunk.pos.z };
+                    var neighbour_pos = iVec3{ .x = chunk.pos.x - 1, .y = chunk.pos.y, .z = chunk.pos.z };
                     const chunk_ptr = self.chunks.get(neighbour_pos.hash());
 
                     if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
                 },
                 .PosZ => {
-                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x, .y = chunk.pos.y, .z = chunk.pos.z + 1 };
+                    var neighbour_pos = iVec3{ .x = chunk.pos.x, .y = chunk.pos.y, .z = chunk.pos.z + 1 };
                     const chunk_ptr = self.chunks.get(neighbour_pos.hash());
 
                     if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
                 },
                 .NegZ => {
-                    var neighbour_pos = ChunkCoord{ .x = chunk.pos.x, .y = chunk.pos.y, .z = chunk.pos.z - 1 };
+                    var neighbour_pos = iVec3{ .x = chunk.pos.x, .y = chunk.pos.y, .z = chunk.pos.z - 1 };
                     const chunk_ptr = self.chunks.get(neighbour_pos.hash());
 
                     if (chunk_ptr == null) neighbours[face_idx] = null else neighbours[face_idx] = chunk_ptr.?;
@@ -329,7 +329,7 @@ pub const World = struct {
             const local_y: usize = @intCast(@mod(currentY, 32));
             const local_z: usize = @intCast(@mod(currentZ, 32));
 
-            var coords = ChunkCoord{ .x = chunk_x, .y = chunk_y, .z = chunk_z };
+            var coords = iVec3{ .x = chunk_x, .y = chunk_y, .z = chunk_z };
             if (self.chunks.get(coords.hash())) |chunk_ptr| {
                 const block = chunk_ptr.blocks[local_y + (32 * local_x) + (32 * 32 * local_z)];
 
@@ -338,7 +338,7 @@ pub const World = struct {
                     const prev_chunk_y: i32 = @divFloor(prevY, 32);
                     const prev_chunk_z: i32 = @divFloor(prevZ, 32);
 
-                    const prev_chunk_coords = ChunkCoord{ .x = prev_chunk_x, .y = prev_chunk_y, .z = prev_chunk_z };
+                    const prev_chunk_coords = iVec3{ .x = prev_chunk_x, .y = prev_chunk_y, .z = prev_chunk_z };
 
                     const prev_x: usize = @intCast(@mod(prevX, 32));
                     const prev_y: usize = @intCast(@mod(prevY, 32));
