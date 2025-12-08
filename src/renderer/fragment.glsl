@@ -2,6 +2,7 @@
 out vec4 FragColor;
 
 in vec3 Norm;
+in vec3 Col;
 in vec3 LightDir;
 
 void main() {
@@ -25,5 +26,5 @@ void main() {
 		float lighting = ambient + 0.3 * d;
 		lighting *= ao;
 
-		FragColor = vec4(0.1, 0.2, 0.3, 1.0) * lighting;
+		FragColor = vec4(Col.xyz, 1.0) * lighting;
 }

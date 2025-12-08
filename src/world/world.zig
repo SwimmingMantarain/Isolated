@@ -155,7 +155,7 @@ pub const World = struct {
             const dist_x = @abs(chunk_ptr.pos.x - cam_chunk_x);
             const dist_z = @abs(chunk_ptr.pos.z - cam_chunk_z);
 
-            if (dist_x > self.chunk_radius or dist_z > self.chunk_radius and chunk_ptr.state == .Idle) {
+            if ((dist_x > self.chunk_radius or dist_z > self.chunk_radius) and chunk_ptr.state == .Idle) {
                 try chunks.append(self.alloc, entry.key_ptr.*);
             }
         }
@@ -336,7 +336,7 @@ pub const World = struct {
             if (self.chunks.get(coords.hash())) |chunk_ptr| {
                 const block = chunk_ptr.blocks[local_y + (32 * local_x) + (32 * 32 * local_z)];
 
-                if (block == .Solid) {
+                if (block.isSolid()) {
                     const prev_chunk_x: i32 = @divFloor(prevX, 32);
                     const prev_chunk_y: i32 = @divFloor(prevY, 32);
                     const prev_chunk_z: i32 = @divFloor(prevZ, 32);
@@ -425,7 +425,7 @@ pub const World = struct {
         chunk_ptr.mutex.lock();
         defer chunk_ptr.mutex.unlock();
 
-        chunk_ptr.blocks[hit.?.prev_coords[1] + (32 * hit.?.prev_coords[0]) + (32 * 32 * hit.?.prev_coords[2])] = .Solid;
+        chunk_ptr.blocks[hit.?.prev_coords[1] + (32 * hit.?.prev_coords[0]) + (32 * 32 * hit.?.prev_coords[2])] = .Dirt;
 
         if (chunk_ptr.state == .Idle) {
             chunk_ptr.state = .ToMesh;

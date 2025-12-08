@@ -100,30 +100,6 @@ pub const Chunk = struct {
         }
         defer _ = cl.clReleaseMemObject(blocks_mem);
 
-        const axis_cols_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 3 * 32 * 32 * @sizeOf(u32), null, &err);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to create axis_cols buffer: {}", .{err});
-            return error.OpenCLBufferCreationFailed;
-        }
-        defer _ = cl.clReleaseMemObject(axis_cols_mem);
-
-        const col_face_masks_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_READ_WRITE, 6 * 32 * 32 * @sizeOf(u32), null, &err);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to create col_face_masks buffer: {}", .{err});
-            return error.OpenCLBufferCreationFailed;
-        }
-        defer _ = cl.clReleaseMemObject(col_face_masks_mem);
-
-        const out_planes_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 6 * 32 * 32 * @sizeOf(u32), null, &err);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to create out planes buffer: {}", .{err});
-            return error.OpenCLBufferCreationFailed;
-        }
-        defer _ = cl.clReleaseMemObject(out_planes_mem);
-
-        var axis_cols: [3 * 32 * 32]u32 = undefined;
-        @memset(&axis_cols, 0);
-
         // Upload blocks directly to GPU (Block enum is u8, same as kernel input)
         err = cl.clEnqueueWriteBuffer(cl_queue, blocks_mem, cl.CL_TRUE, // blocking write
             0, 32 * 32 * 32 * @sizeOf(u8), &self.blocks, 0, null, null);
@@ -132,285 +108,320 @@ pub const Chunk = struct {
             return error.OpenCLBufferWriteFailed;
         }
 
-        // Zero out the persistent axis_cols buffer
-        const zero: u32 = 0;
-        err = cl.clEnqueueFillBuffer(
-            cl_queue,
-            axis_cols_mem,
-            &zero,
-            @sizeOf(u32),
-            0,
-            @sizeOf(u32) * 3 * 32 * 32,
-            0,
-            null,
-            null,
-        );
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to fill axis_cols buffer: {}", .{err});
-            return error.OpenCLBufferFillFailed;
-        }
+        // for each block type :)
+        const types = std.enums.values(Block);
+        for (types) |kind| {
+            if (kind == .Air) continue;
 
-        // Set kernel arguments
-        err = cl.clSetKernelArg(axis_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&blocks_mem));
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to set kernel arg 0: {}", .{err});
-            return error.OpenCLKernelArgFailed;
-        }
+            const axis_cols_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 3 * 32 * 32 * @sizeOf(u32), null, &err);
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to create axis_cols buffer: {}", .{err});
+                return error.OpenCLBufferCreationFailed;
+            }
+            defer _ = cl.clReleaseMemObject(axis_cols_mem);
 
-        err = cl.clSetKernelArg(axis_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to set kernel arg 1: {}", .{err});
-            return error.OpenCLKernelArgFailed;
-        }
+            const col_face_masks_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_READ_WRITE, 6 * 32 * 32 * @sizeOf(u32), null, &err);
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to create col_face_masks buffer: {}", .{err});
+                return error.OpenCLBufferCreationFailed;
+            }
+            defer _ = cl.clReleaseMemObject(col_face_masks_mem);
 
-        // Execute kernel with 32x32x32 work items
-        const global_work_size = [3]usize{ 32, 32, 32 };
-        err = cl.clEnqueueNDRangeKernel(
-            cl_queue,
-            axis_kernel,
-            3,
-            null,
-            &global_work_size,
-            null,
-            0,
-            null,
-            null,
-        );
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to enqueue kernel: {}", .{err});
-            return error.OpenCLKernelExecutionFailed;
-        }
+            const out_planes_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 6 * 32 * 32 * @sizeOf(u32), null, &err);
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to create out planes buffer: {}", .{err});
+                return error.OpenCLBufferCreationFailed;
+            }
+            defer _ = cl.clReleaseMemObject(out_planes_mem);
 
-        // Read back results
-        err = cl.clEnqueueReadBuffer(
-            cl_queue,
-            axis_cols_mem,
-            cl.CL_TRUE, // blocking read
-            0,
-            @sizeOf(u32) * 3 * 32 * 32,
-            &axis_cols,
-            0,
-            null,
-            null,
-        );
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to read axis_cols buffer: {}", .{err});
-            return error.OpenCLBufferReadFailed;
-        }
+            var axis_cols: [3 * 32 * 32]u32 = undefined;
+            @memset(&axis_cols, 0);
 
-        // Face culling masks for 6 faces
-        var col_face_masks: [6 * 32 * 32]u32 = undefined;
-        @memset(&col_face_masks, 0);
+            // Zero out the persistent axis_cols buffer
+            const zero: u32 = 0;
+            err = cl.clEnqueueFillBuffer(
+                cl_queue,
+                axis_cols_mem,
+                &zero,
+                @sizeOf(u32),
+                0,
+                @sizeOf(u32) * 3 * 32 * 32,
+                0,
+                null,
+                null,
+            );
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to fill axis_cols buffer: {}", .{err});
+                return error.OpenCLBufferFillFailed;
+            }
 
-        // Generate face masks by comparing adjacent voxels
-        err = cl.clEnqueueWriteBuffer(cl_queue, axis_cols_mem, cl.CL_TRUE, // blocking write
-            0, 3 * 32 * 32 * @sizeOf(u32), &axis_cols, 0, null, null);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to write axis cols buffer: {}", .{err});
-            return error.OpenCLBufferWriteFailed;
-        }
+            // Set kernel arguments
+            err = cl.clSetKernelArg(axis_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&blocks_mem));
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to set kernel arg 0: {}", .{err});
+                return error.OpenCLKernelArgFailed;
+            }
 
-        err = cl.clEnqueueFillBuffer(cl_queue, col_face_masks_mem, &zero, @sizeOf(u32), 0, @sizeOf(u32) * 6 * 32 * 32, 0, null, null);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to fill col face buffer: {}", .{err});
-            return error.OpenCLBufferFillFailed;
-        }
+            err = cl.clSetKernelArg(axis_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to set kernel arg 1: {}", .{err});
+                return error.OpenCLKernelArgFailed;
+            }
 
-        err = cl.clSetKernelArg(cull_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to set kernel arg 0: {}", .{err});
-            return error.OpenCLKernelArgFailed;
-        }
+            err = cl.clSetKernelArg(axis_kernel, 2, @sizeOf(u8), @ptrCast(&kind));
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to set kernel arg 2: {}", .{err});
+                return error.OpenCLKernelArgFailed;
+            }
 
-        err = cl.clSetKernelArg(cull_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to set kernel arg 1: {}", .{err});
-            return error.OpenCLKernelArgFailed;
-        }
+            // Execute kernel with 32x32x32 work items
+            const global_work_size = [3]usize{ 32, 32, 32 };
+            err = cl.clEnqueueNDRangeKernel(
+                cl_queue,
+                axis_kernel,
+                3,
+                null,
+                &global_work_size,
+                null,
+                0,
+                null,
+                null,
+            );
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to enqueue kernel: {}", .{err});
+                return error.OpenCLKernelExecutionFailed;
+            }
 
-        const cull_work_size = [3]usize{ 3, 32, 32 };
-        err = cl.clEnqueueNDRangeKernel(cl_queue, cull_kernel, 3, null, &cull_work_size, null, 0, null, null);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to enqueue kernel: {}", .{err});
-            return error.OpenCLKernelExecutionFailed;
-        }
+            // Read back results
+            err = cl.clEnqueueReadBuffer(
+                cl_queue,
+                axis_cols_mem,
+                cl.CL_TRUE, // blocking read
+                0,
+                @sizeOf(u32) * 3 * 32 * 32,
+                &axis_cols,
+                0,
+                null,
+                null,
+            );
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to read axis_cols buffer: {}", .{err});
+                return error.OpenCLBufferReadFailed;
+            }
 
-        err = cl.clEnqueueReadBuffer(
-            cl_queue,
-            col_face_masks_mem,
-            cl.CL_TRUE,
-            0,
-            @sizeOf(u32) * 6 * 32 * 32,
-            &col_face_masks,
-            0,
-            null,
-            null,
-        );
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to read buffer: {}", .{err});
-            return error.OpenCLBufferReadFailed;
-        }
+            // Face culling masks for 6 faces
+            var col_face_masks: [6 * 32 * 32]u32 = undefined;
+            @memset(&col_face_masks, 0);
 
-        // Border control
-        for (0..6) |face_idx| {
-            const face: Face = @enumFromInt(face_idx);
+            // Generate face masks by comparing adjacent voxels
+            err = cl.clEnqueueWriteBuffer(cl_queue, axis_cols_mem, cl.CL_TRUE, // blocking write
+                0, 3 * 32 * 32 * @sizeOf(u32), &axis_cols, 0, null, null);
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to write axis cols buffer: {}", .{err});
+                return error.OpenCLBufferWriteFailed;
+            }
 
-            if (neighbours[face_idx]) |neighbour| {
-                const opposites = [_]Face{
-                    .PosY, .NegY,
-                    .PosX, .NegX,
-                    .PosZ, .NegZ,
-                };
+            err = cl.clEnqueueFillBuffer(cl_queue, col_face_masks_mem, &zero, @sizeOf(u32), 0, @sizeOf(u32) * 6 * 32 * 32, 0, null, null);
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to fill col face buffer: {}", .{err});
+                return error.OpenCLBufferFillFailed;
+            }
 
-                const opposite_face = opposites[face_idx];
+            err = cl.clSetKernelArg(cull_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to set kernel arg 0: {}", .{err});
+                return error.OpenCLKernelArgFailed;
+            }
 
-                neighbour.mutex.lock();
-                const neighbour_border = neighbour.getBorderFace(opposite_face);
-                neighbour.mutex.unlock();
+            err = cl.clSetKernelArg(cull_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to set kernel arg 1: {}", .{err});
+                return error.OpenCLKernelArgFailed;
+            }
 
-                const face_base = face_idx * 32 * 32;
-                const axis = face_idx / 2; // 0 = Y, 1 = X, 2 = Z
+            const cull_work_size = [3]usize{ 3, 32, 32 };
+            err = cl.clEnqueueNDRangeKernel(cl_queue, cull_kernel, 3, null, &cull_work_size, null, 0, null, null);
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to enqueue kernel: {}", .{err});
+                return error.OpenCLKernelExecutionFailed;
+            }
 
-                var neighbour_cols: [32 * 32]u32 = undefined;
-                @memset(&neighbour_cols, 0);
+            err = cl.clEnqueueReadBuffer(
+                cl_queue,
+                col_face_masks_mem,
+                cl.CL_TRUE,
+                0,
+                @sizeOf(u32) * 6 * 32 * 32,
+                &col_face_masks,
+                0,
+                null,
+                null,
+            );
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to read buffer: {}", .{err});
+                return error.OpenCLBufferReadFailed;
+            }
 
-                if (axis == 0) { // Y
-                    for (0..32) |z| {
-                        for (0..32) |x| {
-                            const border_idx = z * 32 + x;
-                            if (neighbour_border[border_idx] == .Solid) {
-                                const bit_pos: u5 = if (face == .PosY) 31 else 0;
-                                neighbour_cols[z * 32 + x] |= (@as(u32, 1) << bit_pos);
-                            }
-                        }
-                    }
-                } else if (axis == 1) { // X
-                    for (0..32) |y| {
+            // Border control
+            for (0..6) |face_idx| {
+                const face: Face = @enumFromInt(face_idx);
+
+                if (neighbours[face_idx]) |neighbour| {
+                    const opposites = [_]Face{
+                        .PosY, .NegY,
+                        .PosX, .NegX,
+                        .PosZ, .NegZ,
+                    };
+
+                    const opposite_face = opposites[face_idx];
+
+                    neighbour.mutex.lock();
+                    const neighbour_border = neighbour.getBorderFace(opposite_face);
+                    neighbour.mutex.unlock();
+
+                    const face_base = face_idx * 32 * 32;
+                    const axis = face_idx / 2; // 0 = Y, 1 = X, 2 = Z
+
+                    var neighbour_cols: [32 * 32]u32 = undefined;
+                    @memset(&neighbour_cols, 0);
+
+                    if (axis == 0) { // Y
                         for (0..32) |z| {
-                            const border_idx = y * 32 + z;
-                            if (neighbour_border[border_idx] == .Solid) {
-                                const bit_pos: u5 = if (face == .PosX) 31 else 0;
-                                neighbour_cols[y * 32 + z] |= (@as(u32, 1) << bit_pos);
+                            for (0..32) |x| {
+                                const border_idx = z * 32 + x;
+                                if (neighbour_border[border_idx] == kind) {
+                                    const bit_pos: u5 = if (face == .PosY) 31 else 0;
+                                    neighbour_cols[z * 32 + x] |= (@as(u32, 1) << bit_pos);
+                                }
+                            }
+                        }
+                    } else if (axis == 1) { // X
+                        for (0..32) |y| {
+                            for (0..32) |z| {
+                                const border_idx = y * 32 + z;
+                                if (neighbour_border[border_idx] == kind) {
+                                    const bit_pos: u5 = if (face == .PosX) 31 else 0;
+                                    neighbour_cols[y * 32 + z] |= (@as(u32, 1) << bit_pos);
+                                }
+                            }
+                        }
+                    } else { // Z
+                        for (0..32) |y| {
+                            for (0..32) |x| {
+                                const border_idx = y * 32 + x;
+                                if (neighbour_border[border_idx] == kind) {
+                                    const bit_pos: u5 = if (face == .PosZ) 31 else 0;
+                                    neighbour_cols[y * 32 + x] |= (@as(u32, 1) << bit_pos);
+                                }
                             }
                         }
                     }
-                } else { // Z
-                    for (0..32) |y| {
-                        for (0..32) |x| {
-                            const border_idx = y * 32 + x;
-                            if (neighbour_border[border_idx] == .Solid) {
-                                const bit_pos: u5 = if (face == .PosZ) 31 else 0;
-                                neighbour_cols[y * 32 + x] |= (@as(u32, 1) << bit_pos);
-                            }
-                        }
+
+                    for (0..32 * 32) |i| {
+                        col_face_masks[face_base + i] &= ~neighbour_cols[i];
                     }
                 }
+            }
 
-                for (0..32 * 32) |i| {
-                    col_face_masks[face_base + i] &= ~neighbour_cols[i];
+            // Create planes for greedy meshing
+            var planes: [6 * 32 * 32]u32 = undefined;
+            @memset(&planes, 0);
+
+            err = cl.clEnqueueWriteBuffer(cl_queue, col_face_masks_mem, cl.CL_TRUE, // blocking write
+                0, 6 * 32 * 32 * @sizeOf(u32), &col_face_masks, 0, null, null);
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to write col face masks buffer: {}", .{err});
+                return error.OpenCLBufferWriteFailed;
+            }
+
+            err = cl.clEnqueueFillBuffer(cl_queue, out_planes_mem, &zero, @sizeOf(u32), 0, @sizeOf(u32) * 6 * 32 * 32, 0, null, null);
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to fill planes buffer: {}", .{err});
+                return error.OpenCLBufferWriteFailed;
+            }
+
+            err = cl.clSetKernelArg(greedy_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to set kernel arg 0: {}", .{err});
+                return error.OpenCLKernelArgFailed;
+            }
+
+            err = cl.clSetKernelArg(greedy_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&out_planes_mem));
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to set kernel arg 1: {}", .{err});
+                return error.OpenCLKernelArgFailed;
+            }
+
+            const global_size_greedy = [1]usize{6};
+            err = cl.clEnqueueNDRangeKernel(
+                cl_queue,
+                greedy_kernel,
+                1,
+                null,
+                &global_size_greedy,
+                null,
+                0,
+                null,
+                null,
+            );
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to enqueue greedy kernel: {}", .{err});
+                return error.OpenCLKernelExecutionFailed;
+            }
+
+            err = cl.clEnqueueReadBuffer(
+                cl_queue,
+                out_planes_mem,
+                cl.CL_TRUE, // blocking read
+                0,
+                @sizeOf(u32) * 6 * 32 * 32,
+                &planes,
+                0,
+                null,
+                null,
+            );
+            if (err != cl.CL_SUCCESS) {
+                std.log.err("Failed to read out planes buffer: {}", .{err});
+                return error.OpenCLBufferReadFailed;
+            }
+
+            // Greedy mesh each face
+            const faces = [_]Face{ .NegY, .PosY, .NegX, .PosX, .NegZ, .PosZ };
+
+            var quads = try std.ArrayList(GreedyQuad).initCapacity(alloc, 2048);
+            defer quads.deinit(alloc);
+
+            for (0..6) |face_idx| {
+                const face = faces[face_idx];
+                const face_base = face_idx * 32 * 32;
+
+                for (0..32) |layer| {
+                    quads.clearRetainingCapacity();
+
+                    const layer_ptr = @as(*[32]u32, @ptrCast(&planes[face_base + (layer * 32)]));
+                    try greedyMeshBinaryPlane(layer_ptr, &quads, alloc);
+
+                    for (quads.items) |quad| {
+                        try self.bmesh.vertices.ensureUnusedCapacity(alloc, 4);
+                        quad.appendVertices(&self.bmesh.vertices, face, @intCast(layer), kind);
+                    }
+                }
+            }
+
+            // Generate indices
+            const vertex_count = self.bmesh.vertices.items.len;
+            const quad_count = vertex_count / 4;
+
+            try self.bmesh.indices.ensureTotalCapacity(alloc, quad_count * 6);
+            for (0..quad_count) |i| {
+                const base: u32 = @intCast(i * 4);
+                for (FACE_INDICES) |idx| {
+                    self.bmesh.indices.appendAssumeCapacity(base + idx);
                 }
             }
         }
 
         alloc.free(neighbours);
-
-        // Create planes for greedy meshing
-        var planes: [6 * 32 * 32]u32 = undefined;
-        @memset(&planes, 0);
-
-        err = cl.clEnqueueWriteBuffer(cl_queue, col_face_masks_mem, cl.CL_TRUE, // blocking write
-            0, 6 * 32 * 32 * @sizeOf(u32), &col_face_masks, 0, null, null);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to write col face masks buffer: {}", .{err});
-            return error.OpenCLBufferWriteFailed;
-        }
-
-        err = cl.clEnqueueFillBuffer(cl_queue, out_planes_mem, &zero, @sizeOf(u32), 0, @sizeOf(u32) * 6 * 32 * 32, 0, null, null);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to fill planes buffer: {}", .{err});
-            return error.OpenCLBufferWriteFailed;
-        }
-
-        err = cl.clSetKernelArg(greedy_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to set kernel arg 0: {}", .{err});
-            return error.OpenCLKernelArgFailed;
-        }
-
-        err = cl.clSetKernelArg(greedy_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&out_planes_mem));
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to set kernel arg 1: {}", .{err});
-            return error.OpenCLKernelArgFailed;
-        }
-
-        const global_size_greedy = [1]usize{6};
-        err = cl.clEnqueueNDRangeKernel(
-            cl_queue,
-            greedy_kernel,
-            1,
-            null,
-            &global_size_greedy,
-            null,
-            0,
-            null,
-            null,
-        );
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to enqueue greedy kernel: {}", .{err});
-            return error.OpenCLKernelExecutionFailed;
-        }
-
-        err = cl.clEnqueueReadBuffer(
-            cl_queue,
-            out_planes_mem,
-            cl.CL_TRUE, // blocking read
-            0,
-            @sizeOf(u32) * 6 * 32 * 32,
-            &planes,
-            0,
-            null,
-            null,
-        );
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to read out planes buffer: {}", .{err});
-            return error.OpenCLBufferReadFailed;
-        }
-
-        // Greedy mesh each face
-        const faces = [_]Face{ .NegY, .PosY, .NegX, .PosX, .NegZ, .PosZ };
-
-        var quads = try std.ArrayList(GreedyQuad).initCapacity(alloc, 2048);
-        defer quads.deinit(alloc);
-
-        for (0..6) |face_idx| {
-            const face = faces[face_idx];
-            const face_base = face_idx * 32 * 32;
-
-            for (0..32) |layer| {
-                quads.clearRetainingCapacity();
-
-                const layer_ptr = @as(*[32]u32, @ptrCast(&planes[face_base + (layer * 32)]));
-                try greedyMeshBinaryPlane(layer_ptr, &quads, alloc);
-
-                for (quads.items) |quad| {
-                    try self.bmesh.vertices.ensureUnusedCapacity(alloc, 4);
-                    quad.appendVertices(&self.bmesh.vertices, face, @intCast(layer));
-                }
-            }
-        }
-
-        // Generate indices
-        const vertex_count = self.bmesh.vertices.items.len;
-        const quad_count = vertex_count / 4;
-
-        try self.bmesh.indices.ensureTotalCapacity(alloc, quad_count * 6);
-        for (0..quad_count) |i| {
-            const base: u32 = @intCast(i * 4);
-            for (FACE_INDICES) |idx| {
-                self.bmesh.indices.appendAssumeCapacity(base + idx);
-            }
-        }
-
         self.state = .ToUpload;
     }
 

@@ -12,7 +12,7 @@ pub const Biome = enum(u8) {
 
     fn max_height(self: Biome) f64 {
         return switch (self) {
-            .Forest => 50.0, // at some point there will be a sea
+            .Forest => 60.0, // at some point there will be a sea
             .Desert => 45.0,
             .Mountains => 85.0,
         };
@@ -55,11 +55,15 @@ pub fn genChunk(chunk: *Chunk, gen: *noize.Gen) void {
 
             if (height <= 1 or std.math.isNan(height)) height = 1;
 
-            for (0..32) |y| {
-                const world_y = @as(f64, @floatFromInt(world_y_offset)) + @as(f64, @floatFromInt(y));
+            const int_height: i32 = @intFromFloat(height);
 
-                if (world_y < height) {
-                    chunk.blocks[y + (32 * x) + (32 * 32 * z)] = .Solid;
+            for (0..32) |y| {
+                const world_y: i32 = world_y_offset + @as(i32, @intCast(y));
+
+                if (world_y < int_height) {
+                    chunk.blocks[y + (32 * x) + (32 * 32 * z)] = .Dirt;
+                } else if (world_y == int_height) {
+                    chunk.blocks[y + (32 * x) + (32 * 32 * z)] = .Grass;
                 }
             }
         }

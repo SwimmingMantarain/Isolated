@@ -6,6 +6,7 @@ const Vec3 = @import("../util.zig").Vec3;
 pub const Vertex = packed struct {
     pos: Vec3,
     norm: Vec3,
+    col: Vec3,
 };
 
 pub const ChunkMesh = struct {
@@ -67,5 +68,9 @@ pub const ChunkMesh = struct {
         // normals
         gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(3 * @sizeOf(f32)));
         gl.glEnableVertexAttribArray(1);
+
+        // colors
+        gl.glVertexAttribPointer(2, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(6 * @sizeOf(f32)));
+        gl.glEnableVertexAttribArray(2);
     }
 };

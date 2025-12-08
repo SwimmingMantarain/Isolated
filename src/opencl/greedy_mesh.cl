@@ -1,7 +1,8 @@
 // Builds Axis Columns
 typedef enum {
     Air = 0,
-    Solid = 1,
+    Grass = 1,
+    Dirt = 2,
 } Block;
 
 inline uint blocks_index(uint x, uint y, uint z) {
@@ -14,7 +15,8 @@ inline uint axis_index(uint axis, uint row, uint col) {
 
 __kernel void build_axis_cols(
     __global const uchar* blocks_flat, // each element: 0=Air or 1=Solid, length 32*32*32
-    __global uint* axis_cols_flat     // pre-zeroed, length = 3*32*32 (3072)
+    __global uint* axis_cols_flat,     // pre-zeroed, length = 3*32*32 (3072)
+    const uchar kind
 ) {
     const uint gx = get_global_id(0); // x in [0..31]
     const uint gy = get_global_id(1); // y in [0..31]
@@ -25,7 +27,7 @@ __kernel void build_axis_cols(
     const uint bidx = blocks_index(gx, gy, gz);
     const uchar block_val = blocks_flat[bidx];
 
-    if (block_val == Solid) {
+    if (block_val == kind) {
         const uint bit_y = (1u << gy);
         const uint bit_x = (1u << gx);
         const uint bit_z = (1u << gz);
