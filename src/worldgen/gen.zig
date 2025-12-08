@@ -5,14 +5,27 @@ const glfw = @import("glfw");
 
 const Chunk = @import("../world/chunk.zig").Chunk;
 
-pub const Biome = enum {
+pub const Biome = enum(u8) {
     Forest,
     Desert,
-    Mountain,
+    Mountains,
+
+    fn max_height(self: Biome) f64 {
+        return switch (self) {
+            .Forest => 50.0, // at some point there will be a sea
+            .Desert => 45.0,
+            .Mountains => 85.0,
+        };
+    }
+
+    pub fn height(self: Biome, percent: f64) f64 {
+        return self.max_height() * percent;
+    }
 };
 
 pub fn genChunk(chunk: *Chunk, gen: *noize.Gen) void {
     const world_x_offset = chunk.pos.x * 32;
+    const world_y_offset = chunk.pos.y * 32;
     const world_z_offset = chunk.pos.z * 32;
 
     // Biomes
@@ -37,18 +50,17 @@ pub fn genChunk(chunk: *Chunk, gen: *noize.Gen) void {
 
                 const biome: Biome = @enumFromInt(blend.biome_id);
 
-                switch (biome) {
-                    .Forest => height += 12 * blend.percent,
-                    .Desert => height += 4 * blend.percent,
-                    .Mountain => height += 28 * blend.percent,
-                }
+                height += biome.height(blend.percent);
             }
 
-            if (height > 32) height = 32;
             if (height <= 1 or std.math.isNan(height)) height = 1;
 
-            for (0..@intFromFloat(height)) |y| {
-                chunk.blocks[y + (32 * x) + (32 * 32 * z)] = .Solid;
+            for (0..32) |y| {
+                const world_y = @as(f64, @floatFromInt(world_y_offset)) + @as(f64, @floatFromInt(y));
+
+                if (world_y < height) {
+                    chunk.blocks[y + (32 * x) + (32 * 32 * z)] = .Solid;
+                }
             }
         }
     }

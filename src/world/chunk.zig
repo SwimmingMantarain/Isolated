@@ -275,12 +275,12 @@ pub const Chunk = struct {
                 @memset(&neighbour_cols, 0);
 
                 if (axis == 0) { // Y
-                    for (0..32) |x| {
-                        for (0..32) |z| {
-                            const border_idx = x * 32 + z;
+                    for (0..32) |z| {
+                        for (0..32) |x| {
+                            const border_idx = z * 32 + x;
                             if (neighbour_border[border_idx] == .Solid) {
                                 const bit_pos: u5 = if (face == .PosY) 31 else 0;
-                                neighbour_cols[x * 32 + z] |= (@as(u32, 1) << bit_pos);
+                                neighbour_cols[z * 32 + x] |= (@as(u32, 1) << bit_pos);
                             }
                         }
                     }
@@ -438,19 +438,19 @@ pub const Chunk = struct {
 
             switch (face) {
                 .PosY => {
-                    for (0..32) |x| {
-                        for (0..32) |z| {
+                    for (0..32) |z| {
+                        for (0..32) |x| {
                             const block_idx = 31 + (x * 32) + (32 * 32 * z);
-                            const border_idx = face_base + (x * 32) + z;
+                            const border_idx = face_base + (z * 32) + x;
                             self.border_blocks[border_idx] = self.blocks[block_idx];
                         }
                     }
                 },
                 .NegY => {
-                    for (0..32) |x| {
-                        for (0..32) |z| {
+                    for (0..32) |z| {
+                        for (0..32) |x| {
                             const block_idx = 0 + (x * 32) + (32 * 32 * z);
-                            const border_idx = face_base + (x * 32) + z;
+                            const border_idx = face_base + (z * 32) + x;
                             self.border_blocks[border_idx] = self.blocks[block_idx];
                         }
                     }

@@ -34,6 +34,7 @@ pub const World = struct {
     greedy_kernel: cl.cl_kernel,
     gen: *noize.Gen,
     chunk_radius: u32 = 8,
+    max_chunk_height: u32 = 3,
 
     // multithreading shit
     chunks_mutex: std.Thread.Mutex = .{},
@@ -108,15 +109,17 @@ pub const World = struct {
         while (x <= self.chunk_radius) : (x += 1) {
             var z: i32 = -@as(i32, @intCast(self.chunk_radius));
             while (z <= self.chunk_radius) : (z += 1) {
-                var coords = iVec3{ .x = cam_chunk_x + x, .y = 0, .z = cam_chunk_z + z };
+                for (0..self.max_chunk_height) |y| {
+                    var coords = iVec3{ .x = cam_chunk_x + x, .y = @intCast(y), .z = cam_chunk_z + z };
 
-                if (self.chunks.get(coords.hash()) == null) {
-                    const chunk = try Chunk.create(self.alloc, coords);
+                    if (self.chunks.get(coords.hash()) == null) {
+                        const chunk = try Chunk.create(self.alloc, coords);
 
-                    chunk.state = .New;
+                        chunk.state = .New;
 
-                    try self.chunks.put(coords.hash(), chunk);
-                    try chunks.append(self.alloc, chunk.pos.hash());
+                        try self.chunks.put(coords.hash(), chunk);
+                        try chunks.append(self.alloc, chunk.pos.hash());
+                    }
                 }
             }
         }
