@@ -5,6 +5,7 @@ const noize = @import("noize");
 
 const Shader = @import("./renderer/shader.zig").Shader;
 const World = @import("./world/world.zig").World;
+const Console = @import("./ui/dev/console.zig").Console;
 
 const cglfw = @cImport({
     @cInclude("GLFW/glfw3.h");
@@ -29,7 +30,8 @@ pub fn main() !void {
 
     // GLFW & OpenGL Init
     const cam = Camera{ .aspect_ratio = 800.0 / 600.0 };
-    var config = Config{ .cam = cam };
+    const console = try Console.init(alloc);
+    var config = Config{ .cam = cam, .console = console };
     updateCamDir(&config.cam);
 
     glfw.init() catch {
@@ -101,7 +103,7 @@ pub fn main() !void {
     var device_name: [256]u8 = undefined;
     @memset(device_name[0..256], 0);
     _ = cl.clGetDeviceInfo(devices, cl.CL_DEVICE_NAME, device_name.len, &device_name, null);
-    std.log.info("Using gpu: {s}", .{device_name});
+    config.console.log("Using gpu: {s}", .{device_name}, .Info);
 
     // context
     var err: cl.cl_int = undefined;
@@ -192,6 +194,7 @@ pub fn main() !void {
         return;
     };
 
+    // test console
     while (!glfw.windowShouldClose(w)) {
         processInput(w, &config);
 
@@ -282,6 +285,8 @@ pub fn main() !void {
 
         // redraw imgui
         draw_gui(&config, imio);
+        config.console.render();
+
         imgui.ImGui_Render();
         imgui.cImGui_ImplOpenGL3_RenderDrawData(imgui.ImGui_GetDrawData());
 
@@ -290,6 +295,7 @@ pub fn main() !void {
         glfw.pollEvents();
     }
 
+    config.console.deinit();
     world.deinit();
     glfw.destroyWindow(w);
     glfw.terminate();
@@ -327,6 +333,7 @@ const Config = struct {
     wireframe: bool = false,
     v_was_pressed: bool = false,
     f_was_pressed: bool = false,
+    bt_was_pressed: bool = false,
     window_width: u32 = 800,
     window_height: u32 = 600,
     cam: Camera,
@@ -335,12 +342,22 @@ const Config = struct {
     last_block_action: f64 = 0.0,
     block_cooldown: f64 = 0.001,
     window_focused: bool = false,
+    console: Console,
 };
 
 fn processInput(w: ?*glfw.Window, config: *Config) void {
     if (glfw.getKey(w, glfw.KeyEscape) == 1) glfw.setWindowShouldClose(w, true);
-    const v_pressed = glfw.getKey(w, glfw.KeyV) == 1;
 
+    // Toggle console with backtick
+    const bt_pressed = glfw.getKey(w, glfw.KeyGraveAccent) == 1;
+    if (bt_pressed and !config.bt_was_pressed) {
+        config.console.visible = !config.console.visible;
+    }
+    config.bt_was_pressed = bt_pressed;
+
+    if (config.console.visible) return;
+
+    const v_pressed = glfw.getKey(w, glfw.KeyV) == 1;
     if (v_pressed and !config.v_was_pressed) {
         config.wireframe = !config.wireframe;
         if (config.wireframe) {
@@ -421,7 +438,7 @@ fn fb_size_callback(w: *c_long, width: c_int, height: c_int) callconv(.c) void {
 fn cursor_callback(w: *c_long, x: f64, y: f64) callconv(.c) void {
     const config = @as(*Config, @ptrCast(@alignCast(glfw.getWindowUserPointer(w).?)));
 
-    if (!config.window_focused) return;
+    if (!config.window_focused or config.console.visible) return;
 
     if (config.cam.first_move) {
         config.cam.last_x = x;
