@@ -11,6 +11,7 @@ const World = @import("../world/world.zig").World;
 const Block = @import("../world/block.zig").Block;
 const Face = @import("../world/block.zig").Face;
 const ChunkMesh = @import("../world/mesh.zig").ChunkMesh;
+const OpenCLContext = @import("../opencl/opencl.zig").OpenCLContext;
 const Vertex = @import("../world/mesh.zig").Vertex;
 const Chunk = @import("../world/chunk.zig").Chunk;
 
@@ -129,10 +130,6 @@ pub fn meshWorker(
                         world.alloc,
                         neighbours,
                         world.cl_context,
-                        world.cl_queue,
-                        world.axis_kernel,
-                        world.cull_kernel,
-                        world.greedy_kernel,
                     );
                 }
 

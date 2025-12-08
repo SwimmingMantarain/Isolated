@@ -6,6 +6,7 @@ const noize = @import("noize");
 const Camera = @import("../main.zig").Camera;
 const Chunk = @import("../world/chunk.zig").Chunk;
 const ChunkJob = @import("../threading/worker.zig").ChunkJob;
+const OpenCLContext = @import("../opencl/opencl.zig").OpenCLContext;
 const Face = @import("../world/block.zig").Face;
 const meshWorker = @import("../threading/worker.zig").meshWorker;
 const iVec3 = @import("../util.zig").iVec3;
@@ -26,12 +27,7 @@ const Hit = struct {
 pub const World = struct {
     alloc: std.mem.Allocator,
     chunks: std.AutoHashMap(u64, *Chunk),
-    cl_context: cl.cl_context,
-    cl_device: cl.cl_device_id,
-    cl_queue: cl.cl_command_queue,
-    axis_kernel: cl.cl_kernel,
-    cull_kernel: cl.cl_kernel,
-    greedy_kernel: cl.cl_kernel,
+    cl_context: *OpenCLContext,
     gen: *noize.Gen,
     chunk_radius: u32 = 8,
     max_chunk_height: u32 = 3,
@@ -56,9 +52,9 @@ pub const World = struct {
             .type = .Worley,
             .alloc = self.alloc,
             .opencl = .{
-                .cl_context = self.cl_context,
-                .cl_queue = self.cl_queue,
-                .cl_devices = self.cl_device,
+                .cl_context = self.cl_context.context,
+                .cl_queue = self.cl_context.queue,
+                .cl_devices = self.cl_context.devices,
             },
         };
 

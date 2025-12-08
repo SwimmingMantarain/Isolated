@@ -4,6 +4,7 @@ const Block = @import("./block.zig").Block;
 const Face = @import("./block.zig").Face;
 const ChunkMesh = @import("./mesh.zig").ChunkMesh;
 const GreedyQuad = @import("../meshing/greedy.zig").GreedyQuad;
+const OpenCLContext = @import("../opencl/opencl.zig").OpenCLContext;
 const iVec3 = @import("../util.zig").iVec3;
 const Gen = @import("noize").Gen;
 
@@ -35,12 +36,12 @@ pub const Chunk = struct {
     mutex: std.Thread.Mutex,
 
     pub fn create(alloc: std.mem.Allocator, pos: iVec3) !*Chunk {
-        const chunk_ptr = try alloc.create(Chunk); // TODO: Add logging via console
+        const chunk_ptr = try alloc.create(Chunk);
         errdefer alloc.destroy(chunk_ptr);
 
         @memset(&chunk_ptr.blocks, .Air);
 
-        chunk_ptr.fmesh = try ChunkMesh.create(alloc); // TODO: Add logging via console
+        chunk_ptr.fmesh = try ChunkMesh.create(alloc);
         chunk_ptr.bmesh = try ChunkMesh.create(alloc);
         chunk_ptr.pos = pos;
         chunk_ptr.state = .New;
@@ -74,13 +75,8 @@ pub const Chunk = struct {
         self: *Chunk,
         alloc: std.mem.Allocator,
         neighbours: []?*Chunk,
-        cl_context: cl.cl_context,
-        cl_queue: cl.cl_command_queue,
-        axis_kernel: cl.cl_kernel,
-        cull_kernel: cl.cl_kernel,
-        greedy_kernel: cl.cl_kernel,
+        cl_context: *OpenCLContext,
     ) !void {
-        // TODO: Add logging via console
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -92,175 +88,48 @@ pub const Chunk = struct {
         try self.bmesh.vertices.ensureTotalCapacity(alloc, 8192);
         try self.bmesh.indices.ensureTotalCapacity(alloc, 8192 * 6);
 
-        var err: cl.cl_int = undefined;
-        const blocks_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_READ_ONLY, 32 * 32 * 32 * @sizeOf(u8), null, &err);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to create blocks buffer: {}", .{err});
-            return error.OpenCLBufferCreationFailed;
-        }
+        const blocks_mem = try cl_context.createMem(cl.CL_MEM_READ_ONLY, @sizeOf(u8) * 32 * 32 * 32);
         defer _ = cl.clReleaseMemObject(blocks_mem);
-
-        // Upload blocks directly to GPU (Block enum is u8, same as kernel input)
-        err = cl.clEnqueueWriteBuffer(cl_queue, blocks_mem, cl.CL_TRUE, // blocking write
-            0, 32 * 32 * 32 * @sizeOf(u8), &self.blocks, 0, null, null);
-        if (err != cl.CL_SUCCESS) {
-            std.log.err("Failed to write blocks buffer: {}", .{err});
-            return error.OpenCLBufferWriteFailed;
-        }
+        try cl_context.writeMem(blocks_mem, @sizeOf(u8) * 32 * 32 * 32, &self.blocks);
 
         // for each block type :)
         const types = std.enums.values(Block);
         for (types) |kind| {
             if (kind == .Air) continue;
 
-            const axis_cols_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 3 * 32 * 32 * @sizeOf(u32), null, &err);
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to create axis_cols buffer: {}", .{err});
-                return error.OpenCLBufferCreationFailed;
-            }
+            const axis_cols_mem = try cl_context.createMem(cl.CL_MEM_READ_WRITE, 3 * 32 * 32 * @sizeOf(u32));
             defer _ = cl.clReleaseMemObject(axis_cols_mem);
 
-            const col_face_masks_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_READ_WRITE, 6 * 32 * 32 * @sizeOf(u32), null, &err);
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to create col_face_masks buffer: {}", .{err});
-                return error.OpenCLBufferCreationFailed;
-            }
+            const col_face_masks_mem = try cl_context.createMem(cl.CL_MEM_READ_WRITE, 6 * 32 * 32 * @sizeOf(u32));
             defer _ = cl.clReleaseMemObject(col_face_masks_mem);
 
-            const out_planes_mem = cl.clCreateBuffer(cl_context, cl.CL_MEM_WRITE_ONLY, 6 * 32 * 32 * @sizeOf(u32), null, &err);
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to create out planes buffer: {}", .{err});
-                return error.OpenCLBufferCreationFailed;
-            }
+            const out_planes_mem = try cl_context.createMem(cl.CL_MEM_WRITE_ONLY, 6 * 32 * 32 * @sizeOf(u32));
             defer _ = cl.clReleaseMemObject(out_planes_mem);
 
             var axis_cols: [3 * 32 * 32]u32 = undefined;
             @memset(&axis_cols, 0);
 
-            // Zero out the persistent axis_cols buffer
-            const zero: u32 = 0;
-            err = cl.clEnqueueFillBuffer(
-                cl_queue,
-                axis_cols_mem,
-                &zero,
-                @sizeOf(u32),
-                0,
-                @sizeOf(u32) * 3 * 32 * 32,
-                0,
-                null,
-                null,
-            );
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to fill axis_cols buffer: {}", .{err});
-                return error.OpenCLBufferFillFailed;
-            }
-
             // Set kernel arguments
-            err = cl.clSetKernelArg(axis_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&blocks_mem));
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to set kernel arg 0: {}", .{err});
-                return error.OpenCLKernelArgFailed;
-            }
+            try cl_context.setKernelArg(cl_context.axis_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&blocks_mem));
+            try cl_context.setKernelArg(cl_context.axis_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
+            try cl_context.setKernelArg(cl_context.axis_kernel, 2, @sizeOf(Block), @ptrCast(&kind));
 
-            err = cl.clSetKernelArg(axis_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to set kernel arg 1: {}", .{err});
-                return error.OpenCLKernelArgFailed;
-            }
+            const axis_work_size = [3]usize{ 32, 32, 32 };
+            try cl_context.runKernel(cl_context.axis_kernel, axis_work_size[0..]);
+            try cl_context.readMem(axis_cols_mem, @sizeOf(u32) * 3 * 32 * 32, &axis_cols);
 
-            err = cl.clSetKernelArg(axis_kernel, 2, @sizeOf(u8), @ptrCast(&kind));
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to set kernel arg 2: {}", .{err});
-                return error.OpenCLKernelArgFailed;
-            }
-
-            // Execute kernel with 32x32x32 work items
-            const global_work_size = [3]usize{ 32, 32, 32 };
-            err = cl.clEnqueueNDRangeKernel(
-                cl_queue,
-                axis_kernel,
-                3,
-                null,
-                &global_work_size,
-                null,
-                0,
-                null,
-                null,
-            );
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to enqueue kernel: {}", .{err});
-                return error.OpenCLKernelExecutionFailed;
-            }
-
-            // Read back results
-            err = cl.clEnqueueReadBuffer(
-                cl_queue,
-                axis_cols_mem,
-                cl.CL_TRUE, // blocking read
-                0,
-                @sizeOf(u32) * 3 * 32 * 32,
-                &axis_cols,
-                0,
-                null,
-                null,
-            );
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to read axis_cols buffer: {}", .{err});
-                return error.OpenCLBufferReadFailed;
-            }
-
-            // Face culling masks for 6 faces
             var col_face_masks: [6 * 32 * 32]u32 = undefined;
             @memset(&col_face_masks, 0);
 
             // Generate face masks by comparing adjacent voxels
-            err = cl.clEnqueueWriteBuffer(cl_queue, axis_cols_mem, cl.CL_TRUE, // blocking write
-                0, 3 * 32 * 32 * @sizeOf(u32), &axis_cols, 0, null, null);
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to write axis cols buffer: {}", .{err});
-                return error.OpenCLBufferWriteFailed;
-            }
+            try cl_context.writeMem(axis_cols_mem, 3 * 32 * 32 * @sizeOf(u32), &axis_cols);
 
-            err = cl.clEnqueueFillBuffer(cl_queue, col_face_masks_mem, &zero, @sizeOf(u32), 0, @sizeOf(u32) * 6 * 32 * 32, 0, null, null);
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to fill col face buffer: {}", .{err});
-                return error.OpenCLBufferFillFailed;
-            }
-
-            err = cl.clSetKernelArg(cull_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to set kernel arg 0: {}", .{err});
-                return error.OpenCLKernelArgFailed;
-            }
-
-            err = cl.clSetKernelArg(cull_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to set kernel arg 1: {}", .{err});
-                return error.OpenCLKernelArgFailed;
-            }
+            try cl_context.setKernelArg(cl_context.cull_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
+            try cl_context.setKernelArg(cl_context.cull_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
 
             const cull_work_size = [3]usize{ 3, 32, 32 };
-            err = cl.clEnqueueNDRangeKernel(cl_queue, cull_kernel, 3, null, &cull_work_size, null, 0, null, null);
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to enqueue kernel: {}", .{err});
-                return error.OpenCLKernelExecutionFailed;
-            }
-
-            err = cl.clEnqueueReadBuffer(
-                cl_queue,
-                col_face_masks_mem,
-                cl.CL_TRUE,
-                0,
-                @sizeOf(u32) * 6 * 32 * 32,
-                &col_face_masks,
-                0,
-                null,
-                null,
-            );
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to read buffer: {}", .{err});
-                return error.OpenCLBufferReadFailed;
-            }
+            try cl_context.runKernel(cl_context.cull_kernel, &cull_work_size);
+            try cl_context.readMem(col_face_masks_mem, @sizeOf(u32) * 6 * 32 * 32, &col_face_masks);
 
             // Border control
             for (0..6) |face_idx| {
@@ -327,63 +196,14 @@ pub const Chunk = struct {
             var planes: [6 * 32 * 32]u32 = undefined;
             @memset(&planes, 0);
 
-            err = cl.clEnqueueWriteBuffer(cl_queue, col_face_masks_mem, cl.CL_TRUE, // blocking write
-                0, 6 * 32 * 32 * @sizeOf(u32), &col_face_masks, 0, null, null);
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to write col face masks buffer: {}", .{err});
-                return error.OpenCLBufferWriteFailed;
-            }
+            try cl_context.writeMem(col_face_masks_mem, 6 * 32 * 32 * @sizeOf(u32), &col_face_masks);
 
-            err = cl.clEnqueueFillBuffer(cl_queue, out_planes_mem, &zero, @sizeOf(u32), 0, @sizeOf(u32) * 6 * 32 * 32, 0, null, null);
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to fill planes buffer: {}", .{err});
-                return error.OpenCLBufferWriteFailed;
-            }
-
-            err = cl.clSetKernelArg(greedy_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to set kernel arg 0: {}", .{err});
-                return error.OpenCLKernelArgFailed;
-            }
-
-            err = cl.clSetKernelArg(greedy_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&out_planes_mem));
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to set kernel arg 1: {}", .{err});
-                return error.OpenCLKernelArgFailed;
-            }
+            try cl_context.setKernelArg(cl_context.greedy_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
+            try cl_context.setKernelArg(cl_context.greedy_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&out_planes_mem));
 
             const global_size_greedy = [1]usize{6};
-            err = cl.clEnqueueNDRangeKernel(
-                cl_queue,
-                greedy_kernel,
-                1,
-                null,
-                &global_size_greedy,
-                null,
-                0,
-                null,
-                null,
-            );
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to enqueue greedy kernel: {}", .{err});
-                return error.OpenCLKernelExecutionFailed;
-            }
-
-            err = cl.clEnqueueReadBuffer(
-                cl_queue,
-                out_planes_mem,
-                cl.CL_TRUE, // blocking read
-                0,
-                @sizeOf(u32) * 6 * 32 * 32,
-                &planes,
-                0,
-                null,
-                null,
-            );
-            if (err != cl.CL_SUCCESS) {
-                std.log.err("Failed to read out planes buffer: {}", .{err});
-                return error.OpenCLBufferReadFailed;
-            }
+            try cl_context.runKernel(cl_context.greedy_kernel, &global_size_greedy);
+            try cl_context.readMem(out_planes_mem, @sizeOf(u32) * 6 * 32 * 32, &planes);
 
             // Greedy mesh each face
             const faces = [_]Face{ .NegY, .PosY, .NegX, .PosX, .NegZ, .PosZ };

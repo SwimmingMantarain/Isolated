@@ -6,6 +6,7 @@ const noize = @import("noize");
 const Shader = @import("./renderer/shader.zig").Shader;
 const World = @import("./world/world.zig").World;
 const Console = @import("./ui/dev/console.zig").Console;
+const OpenCLContext = @import("./opencl/opencl.zig").OpenCLContext;
 
 const cglfw = @cImport({
     @cInclude("GLFW/glfw3.h");
@@ -105,79 +106,14 @@ pub fn main() !void {
     _ = cl.clGetDeviceInfo(devices, cl.CL_DEVICE_NAME, device_name.len, &device_name, null);
     config.console.log("Using gpu: {s}", .{device_name}, .Info);
 
-    // context
-    var err: cl.cl_int = undefined;
-    const cl_context = cl.clCreateContext(null, 1, &devices, null, null, &err);
-
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create CL context: {}", .{err});
-        return;
-    }
-    defer _ = cl.clReleaseContext(cl_context);
-
-    // command queue
-    const queue = cl.clCreateCommandQueue(cl_context, devices, 0, &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create command queue: {}", .{err});
-        return;
-    }
-    defer _ = cl.clReleaseCommandQueue(queue);
-
-    // Greedy Mesher
-    const mesh_kernel_src = @embedFile("./opencl/greedy_mesh.cl");
-    const mesh_program = cl.clCreateProgramWithSource(
-        cl_context,
-        1,
-        @ptrCast(@constCast(&mesh_kernel_src)),
-        null,
-        &err,
-    );
-    defer _ = cl.clReleaseProgram(mesh_program);
-
-    if (err != cl.CL_SUCCESS or mesh_program == null) {
-        std.log.err("Failed to compile kernel: {any}", .{err});
-        return;
-    }
-
-    err = cl.clBuildProgram(mesh_program, 1, &devices, null, null, null);
-    if (err != cl.CL_SUCCESS) {
-        var log_size: usize = 0;
-        _ = cl.clGetProgramBuildInfo(mesh_program, devices, cl.CL_PROGRAM_BUILD_LOG, 0, null, &log_size);
-        const buf = try alloc.alloc(u8, log_size);
-        defer alloc.free(buf);
-        _ = cl.clGetProgramBuildInfo(mesh_program, devices, cl.CL_PROGRAM_BUILD_LOG, log_size, buf.ptr, null);
-        std.log.err("Failed to build kernel: {s}", .{buf.ptr[0..buf.len]});
-        return;
-    }
-
-    const axis_kernel = cl.clCreateKernel(mesh_program, "build_axis_cols", &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create axis kernel: {any}", .{err});
-        return;
-    }
-
-    const cull_kernel = cl.clCreateKernel(mesh_program, "cull", &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create culler kernel: {any}", .{err});
-        return;
-    }
-
-    const greedy_kernel = cl.clCreateKernel(mesh_program, "greedy_mesh", &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create mesh kernel: {any}", .{err});
-        return;
-    }
+    var cl_context = try OpenCLContext.init(alloc, devices);
+    defer cl_context.deinit();
 
     // World Init
     var world = World{
         .alloc = alloc,
         .chunks = undefined,
-        .cl_context = cl_context,
-        .cl_device = devices,
-        .cl_queue = queue,
-        .axis_kernel = axis_kernel,
-        .cull_kernel = cull_kernel,
-        .greedy_kernel = greedy_kernel,
+        .cl_context = &cl_context,
         .gen = undefined,
     };
 
