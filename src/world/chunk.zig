@@ -92,114 +92,136 @@ pub const Chunk = struct {
         defer _ = cl.clReleaseMemObject(blocks_mem);
         try cl_context.writeMem(blocks_mem, @sizeOf(u8) * 32 * 32 * 32, &self.blocks);
 
+        const axis_cols_mem = try cl_context.createMem(cl.CL_MEM_READ_WRITE, 3 * 32 * 32 * @sizeOf(u32));
+        defer _ = cl.clReleaseMemObject(axis_cols_mem);
+
+        const col_face_masks_mem = try cl_context.createMem(cl.CL_MEM_READ_WRITE, 6 * 32 * 32 * @sizeOf(u32));
+        defer _ = cl.clReleaseMemObject(col_face_masks_mem);
+
+        const out_planes_mem = try cl_context.createMem(cl.CL_MEM_WRITE_ONLY, 6 * 32 * 32 * @sizeOf(u32));
+        defer _ = cl.clReleaseMemObject(out_planes_mem);
+
+        // --- GLOBAL CULLING PASS ---
+
+        // 1. Build Axis Columns (Global Solids)
+        var axis_cols: [3 * 32 * 32]u32 = undefined;
+        @memset(&axis_cols, 0);
+        // Clear axis cols mem
+        try cl_context.writeMem(axis_cols_mem, @sizeOf(u32) * 3 * 32 * 32, &axis_cols);
+
+        try cl_context.setKernelArg(cl_context.axis_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&blocks_mem));
+        try cl_context.setKernelArg(cl_context.axis_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
+
+        const axis_work_size = [3]usize{ 32, 32, 32 };
+        try cl_context.runKernel(cl_context.axis_kernel, axis_work_size[0..]);
+        // Note: we don't strictly need to read back axis_cols unless we want to debug,
+        // passing it directly to cull_kernel is fine.
+        // But the original code wrote it back before cull_kernel?
+        // Original code: run axis_kernel -> read axis_cols -> write axis_cols -> run cull_kernel.
+        // This suggests the read/write might have been a barrier or debug step, or just redundant.
+        // I will skip the read-back and write-back since it stays on GPU.
+
+        // 2. Face Culling (Global)
+        var col_face_masks: [6 * 32 * 32]u32 = undefined;
+        @memset(&col_face_masks, 0);
+        // Clear masks mem if needed, though cull kernel overwrites usually?
+        // Cull kernel writes: col_face_masks[...] = ...
+        // So no need to clear.
+
+        try cl_context.setKernelArg(cl_context.cull_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
+        try cl_context.setKernelArg(cl_context.cull_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
+
+        const cull_work_size = [3]usize{ 3, 32, 32 };
+        try cl_context.runKernel(cl_context.cull_kernel, &cull_work_size);
+
+        // Read back masks to apply neighbor culling heavily relies on CPU logic currently
+        try cl_context.readMem(col_face_masks_mem, @sizeOf(u32) * 6 * 32 * 32, &col_face_masks);
+
+        // 3. Apply Neighbor Borders (Global)
+        for (0..6) |face_idx| {
+            const face: Face = @enumFromInt(face_idx);
+
+            if (neighbours[face_idx]) |neighbour| {
+                const opposites = [_]Face{
+                    .PosY, .NegY,
+                    .PosX, .NegX,
+                    .PosZ, .NegZ,
+                };
+                const opposite_face = opposites[face_idx];
+
+                neighbour.mutex.lock();
+                const neighbour_border = neighbour.getBorderFace(opposite_face);
+                neighbour.mutex.unlock();
+
+                const face_base = face_idx * 32 * 32;
+                const axis = face_idx / 2; // 0 = Y, 1 = X, 2 = Z
+
+                var neighbour_cols: [32 * 32]u32 = undefined;
+                @memset(&neighbour_cols, 0);
+
+                if (axis == 0) { // Y
+                    for (0..32) |z| {
+                        for (0..32) |x| {
+                            const border_idx = z * 32 + x;
+                            // Check if ANY solid block exists
+                            if (neighbour_border[border_idx] != .Air) {
+                                const bit_pos: u5 = if (face == .PosY) 31 else 0;
+                                neighbour_cols[z * 32 + x] |= (@as(u32, 1) << bit_pos);
+                            }
+                        }
+                    }
+                } else if (axis == 1) { // X
+                    for (0..32) |y| {
+                        for (0..32) |z| {
+                            const border_idx = y * 32 + z;
+                            if (neighbour_border[border_idx] != .Air) {
+                                const bit_pos: u5 = if (face == .PosX) 31 else 0;
+                                neighbour_cols[y * 32 + z] |= (@as(u32, 1) << bit_pos);
+                            }
+                        }
+                    }
+                } else { // Z
+                    for (0..32) |y| {
+                        for (0..32) |x| {
+                            const border_idx = y * 32 + x;
+                            if (neighbour_border[border_idx] != .Air) {
+                                const bit_pos: u5 = if (face == .PosZ) 31 else 0;
+                                neighbour_cols[y * 32 + x] |= (@as(u32, 1) << bit_pos);
+                            }
+                        }
+                    }
+                }
+
+                for (0..32 * 32) |i| {
+                    col_face_masks[face_base + i] &= ~neighbour_cols[i];
+                }
+            }
+        }
+
+        // Write modified masks back to GPU
+        try cl_context.writeMem(col_face_masks_mem, 6 * 32 * 32 * @sizeOf(u32), &col_face_masks);
+
+        // --- PER-TYPE MESHING PASS ---
+
         // for each block type :)
         const types = std.enums.values(Block);
         for (types) |kind| {
             if (kind == .Air) continue;
 
-            const axis_cols_mem = try cl_context.createMem(cl.CL_MEM_READ_WRITE, 3 * 32 * 32 * @sizeOf(u32));
-            defer _ = cl.clReleaseMemObject(axis_cols_mem);
-
-            const col_face_masks_mem = try cl_context.createMem(cl.CL_MEM_READ_WRITE, 6 * 32 * 32 * @sizeOf(u32));
-            defer _ = cl.clReleaseMemObject(col_face_masks_mem);
-
-            const out_planes_mem = try cl_context.createMem(cl.CL_MEM_WRITE_ONLY, 6 * 32 * 32 * @sizeOf(u32));
-            defer _ = cl.clReleaseMemObject(out_planes_mem);
-
-            var axis_cols: [3 * 32 * 32]u32 = undefined;
-            @memset(&axis_cols, 0);
-
-            // Set kernel arguments
-            try cl_context.setKernelArg(cl_context.axis_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&blocks_mem));
-            try cl_context.setKernelArg(cl_context.axis_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
-            try cl_context.setKernelArg(cl_context.axis_kernel, 2, @sizeOf(Block), @ptrCast(&kind));
-
-            const axis_work_size = [3]usize{ 32, 32, 32 };
-            try cl_context.runKernel(cl_context.axis_kernel, axis_work_size[0..]);
-            try cl_context.readMem(axis_cols_mem, @sizeOf(u32) * 3 * 32 * 32, &axis_cols);
-
-            var col_face_masks: [6 * 32 * 32]u32 = undefined;
-            @memset(&col_face_masks, 0);
-
-            // Generate face masks by comparing adjacent voxels
-            try cl_context.writeMem(axis_cols_mem, 3 * 32 * 32 * @sizeOf(u32), &axis_cols);
-
-            try cl_context.setKernelArg(cl_context.cull_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&axis_cols_mem));
-            try cl_context.setKernelArg(cl_context.cull_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
-
-            const cull_work_size = [3]usize{ 3, 32, 32 };
-            try cl_context.runKernel(cl_context.cull_kernel, &cull_work_size);
-            try cl_context.readMem(col_face_masks_mem, @sizeOf(u32) * 6 * 32 * 32, &col_face_masks);
-
-            // Border control
-            for (0..6) |face_idx| {
-                const face: Face = @enumFromInt(face_idx);
-
-                if (neighbours[face_idx]) |neighbour| {
-                    const opposites = [_]Face{
-                        .PosY, .NegY,
-                        .PosX, .NegX,
-                        .PosZ, .NegZ,
-                    };
-
-                    const opposite_face = opposites[face_idx];
-
-                    neighbour.mutex.lock();
-                    const neighbour_border = neighbour.getBorderFace(opposite_face);
-                    neighbour.mutex.unlock();
-
-                    const face_base = face_idx * 32 * 32;
-                    const axis = face_idx / 2; // 0 = Y, 1 = X, 2 = Z
-
-                    var neighbour_cols: [32 * 32]u32 = undefined;
-                    @memset(&neighbour_cols, 0);
-
-                    if (axis == 0) { // Y
-                        for (0..32) |z| {
-                            for (0..32) |x| {
-                                const border_idx = z * 32 + x;
-                                if (neighbour_border[border_idx] == kind) {
-                                    const bit_pos: u5 = if (face == .PosY) 31 else 0;
-                                    neighbour_cols[z * 32 + x] |= (@as(u32, 1) << bit_pos);
-                                }
-                            }
-                        }
-                    } else if (axis == 1) { // X
-                        for (0..32) |y| {
-                            for (0..32) |z| {
-                                const border_idx = y * 32 + z;
-                                if (neighbour_border[border_idx] == kind) {
-                                    const bit_pos: u5 = if (face == .PosX) 31 else 0;
-                                    neighbour_cols[y * 32 + z] |= (@as(u32, 1) << bit_pos);
-                                }
-                            }
-                        }
-                    } else { // Z
-                        for (0..32) |y| {
-                            for (0..32) |x| {
-                                const border_idx = y * 32 + x;
-                                if (neighbour_border[border_idx] == kind) {
-                                    const bit_pos: u5 = if (face == .PosZ) 31 else 0;
-                                    neighbour_cols[y * 32 + x] |= (@as(u32, 1) << bit_pos);
-                                }
-                            }
-                        }
-                    }
-
-                    for (0..32 * 32) |i| {
-                        col_face_masks[face_base + i] &= ~neighbour_cols[i];
-                    }
-                }
-            }
-
-            // Create planes for greedy meshing
+            // Reset planes (allocating on stack is fine/fast)
             var planes: [6 * 32 * 32]u32 = undefined;
-            @memset(&planes, 0);
-
-            try cl_context.writeMem(col_face_masks_mem, 6 * 32 * 32 * @sizeOf(u32), &col_face_masks);
+            // Kernel writes to all of it?
+            // The kernel clears it? No, the kernel initializes: uint planes[32 * 32] = {0}; locally, then writes out.
+            // But verify:
+            // In C kernel: uint planes[32 * 32] = {0}; ... then `out_planes[...] = planes[...]`.
+            // So we don't strictly need to clear host side, since we read FROM gpu.
+            // But we should probably clear the GPU memory or trust the kernel overwrites it.
+            // The kernel overwrites the whole 32*32 range for the face. Yes.
 
             try cl_context.setKernelArg(cl_context.greedy_kernel, 0, @sizeOf(cl.cl_mem), @ptrCast(&col_face_masks_mem));
             try cl_context.setKernelArg(cl_context.greedy_kernel, 1, @sizeOf(cl.cl_mem), @ptrCast(&out_planes_mem));
+            try cl_context.setKernelArg(cl_context.greedy_kernel, 2, @sizeOf(cl.cl_mem), @ptrCast(&blocks_mem));
+            try cl_context.setKernelArg(cl_context.greedy_kernel, 3, @sizeOf(Block), @ptrCast(&kind));
 
             const global_size_greedy = [1]usize{6};
             try cl_context.runKernel(cl_context.greedy_kernel, &global_size_greedy);
