@@ -5,6 +5,7 @@ const Face = @import("../world/block.zig").Face;
 const Block = @import("../world/block.zig").Block;
 
 const newVec3 = @import("../util.zig").newVec3;
+const newVec2 = @import("../util.zig").newVec2;
 
 pub const GreedyQuad = struct {
     x: u32,
@@ -20,7 +21,7 @@ pub const GreedyQuad = struct {
         block: Block,
     ) void {
         const normal = Face.normal(face);
-        const color = block.color();
+        const texCoords = block.uv(face);
 
         const fx = @as(f32, @floatFromInt(self.x));
         const fy = @as(f32, @floatFromInt(self.y));
@@ -30,40 +31,40 @@ pub const GreedyQuad = struct {
 
         switch (face) {
             .PosY => {
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fa + 1.0, fy), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fa + 1.0, fy), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fa + 1.0, fy + fh), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fa + 1.0, fy + fh), .norm = normal, .col = color });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fa + 1.0, fy), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fa + 1.0, fy), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fw, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fa + 1.0, fy + fh), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fw, fh) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fa + 1.0, fy + fh), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, fh) });
             },
             .NegY => {
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fa, fy), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fa, fy), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fa, fy + fh), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fa, fy + fh), .norm = normal, .col = color });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fa, fy), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fa, fy), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fw, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fa, fy + fh), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fw, fh) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fa, fy + fh), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, fh) });
             },
             .PosX => {
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa + 1.0, fx, fy), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa + 1.0, fx + fw, fy), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa + 1.0, fx + fw, fy + fh), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa + 1.0, fx, fy + fh), .norm = normal, .col = color });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa + 1.0, fx, fy), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fh, fw) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa + 1.0, fx + fw, fy), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fh, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa + 1.0, fx + fw, fy + fh), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa + 1.0, fx, fy + fh), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, fw) });
             },
             .NegX => {
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa, fx, fy), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa, fx + fw, fy), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa, fx + fw, fy + fh), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa, fx, fy + fh), .norm = normal, .col = color });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa, fx, fy), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, fw) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa, fx + fw, fy), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa, fx + fw, fy + fh), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fh, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fa, fx, fy + fh), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fh, fw) });
             },
             .PosZ => {
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fy, fa + 1.0), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fy, fa + 1.0), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fy + fh, fa + 1.0), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fy + fh, fa + 1.0), .norm = normal, .col = color });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fy, fa + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, fh) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fy, fa + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fw, fh) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fy + fh, fa + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fw, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fy + fh, fa + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
             },
             .NegZ => {
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fy, fa), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fy, fa), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fy + fh, fa), .norm = normal, .col = color });
-                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fy + fh, fa), .norm = normal, .col = color });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fy, fa), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fw, fh) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fy, fa), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, fh) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx + fw, fy + fh, fa), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
+                vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(fx, fy + fh, fa), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(fw, 0) });
             },
         }
     }

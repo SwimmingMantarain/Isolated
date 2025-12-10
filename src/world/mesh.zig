@@ -2,11 +2,13 @@ const std = @import("std");
 const gl = @cImport(@cInclude("glad/glad.h"));
 
 const Vec3 = @import("../util.zig").Vec3;
+const Vec2 = @import("../util.zig").Vec2;
 
 pub const Vertex = packed struct {
     pos: Vec3,
     norm: Vec3,
-    col: Vec3,
+    tex_id: Vec2, // xy: tile id
+    tex_uv: Vec2, // zw: local uv
 };
 
 pub const ChunkMesh = struct {
@@ -69,8 +71,8 @@ pub const ChunkMesh = struct {
         gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(3 * @sizeOf(f32)));
         gl.glEnableVertexAttribArray(1);
 
-        // colors
-        gl.glVertexAttribPointer(2, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(6 * @sizeOf(f32)));
+        // texture coords: https://community.khronos.org/t/repeat-tile-from-texture-atlas/104500
+        gl.glVertexAttribPointer(2, 4, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), @ptrFromInt(6 * @sizeOf(f32)));
         gl.glEnableVertexAttribArray(2);
     }
 };

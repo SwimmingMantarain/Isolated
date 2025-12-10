@@ -16,6 +16,10 @@ const gl = @cImport({
     @cInclude("glad/glad.h");
 });
 
+const stbi = @cImport({
+    @cInclude("stb/stb_image.h");
+});
+
 const cl = @import("cl").cl;
 
 const imgui = @cImport({
@@ -92,6 +96,8 @@ pub fn main() !void {
         return;
     }
 
+    shader.?.use();
+
     gl.glEnable(gl.GL_DEPTH_TEST);
 
     // Init OpenCL
@@ -130,7 +136,31 @@ pub fn main() !void {
         return;
     };
 
-    // test console
+    // Load texture atlas and send to opengl
+    var atlas_w: c_int = 0;
+    var atlas_h: c_int = 0;
+    var atlas_col_channels: c_int = 0;
+
+    // FIXME: use a proper path for the file
+    const pixels = stbi.stbi_load("./src/assets/textures/atlas.png", &atlas_w, &atlas_h, &atlas_col_channels, 3);
+
+    var atlas_tex: c_uint = 0;
+    gl.glGenTextures(1, @ptrCast(&atlas_tex));
+    gl.glActiveTexture(gl.GL_TEXTURE0);
+    gl.glBindTexture(gl.GL_TEXTURE_2D, atlas_tex);
+    gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1);
+    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB8, atlas_w, atlas_h, 0, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, pixels);
+
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_REPEAT);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT);
+
+    gl.glGenerateMipmap(gl.GL_TEXTURE_2D);
+    stbi.stbi_image_free(pixels);
+
+    gl.glUniform1i(gl.glGetUniformLocation(shader.?.id, "uAtlas"), 0);
+
     while (!glfw.windowShouldClose(w)) {
         processInput(w, &config);
 

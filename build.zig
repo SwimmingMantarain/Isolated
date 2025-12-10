@@ -59,14 +59,16 @@ pub fn build(b: *std.Build) void {
 
     exe.linkLibrary(lib_cimgui);
 
-    exe.linkLibC();
     exe.linkSystemLibrary("glfw");
     exe.linkSystemLibrary("GL");
     exe.linkSystemLibrary("OpenCL");
     exe.linkSystemLibrary("EGL");
     exe.linkSystemLibrary("dl");
-    exe.root_module.addCSourceFile(.{.file = b.path("./src/glad/src/glad.c")});
+    exe.root_module.addCSourceFile(.{ .file = b.path("./src/glad/src/glad.c") });
+    exe.root_module.addCSourceFile(.{ .file = b.path("./cdeps/stbi.c") });
     exe.addIncludePath(b.path("./src/glad/include"));
+
+    exe.linkLibC();
 
     b.installArtifact(exe);
 }
