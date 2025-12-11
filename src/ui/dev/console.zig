@@ -1,4 +1,5 @@
 const std = @import("std");
+const Command = @import("./command.zig").Command;
 
 const imgui = @cImport({
     @cInclude("dcimgui.h");
@@ -71,7 +72,19 @@ pub const Console = struct {
     }
 
     pub fn command(self: *Console, command_str: []const u8) void {
-        self.log("Unknown Command: {s}", .{command_str}, .Err);
+        const com = Command.new(command_str, self.alloc) catch |err| {
+            self.log("Failed to create command: {s}", .{@errorName(err)}, .Crit);
+            return;
+        };
+        defer com.destroy(self.alloc);
+
+        const args = com.args_str(self.alloc) catch |err| {
+            self.log("Failed to parse command args: {s}", .{@errorName(err)}, .Crit);
+            return;
+        };
+        defer self.alloc.free(args);
+
+        self.log("Command: {s} Args: {s}", .{ com.command, args }, .Debug);
     }
 
     pub fn render(self: *Console) void {
