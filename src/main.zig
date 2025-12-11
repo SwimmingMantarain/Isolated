@@ -151,7 +151,7 @@ pub fn main() !void {
     gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1);
     gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB8, atlas_w, atlas_h, 0, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, pixels);
 
-    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST_MIPMAP_NEAREST);
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST);
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_REPEAT);
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT);
