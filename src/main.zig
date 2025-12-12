@@ -3,10 +3,9 @@ const math = @import("zlm").as(f32);
 const glfw = @import("glfw");
 const noize = @import("noize");
 
-const Shader = @import("./renderer/shader.zig").Shader;
 const World = @import("./world/world.zig").World;
 const Console = @import("./ui/dev/console.zig").Console;
-const OpenCLContext = @import("./opencl/opencl.zig").OpenCLContext;
+const OpenGLContext = @import("./renderer/opengl.zig").OpenGLContext;
 
 const cglfw = @cImport({
     @cInclude("GLFW/glfw3.h");
@@ -43,7 +42,7 @@ pub fn main() !void {
         std.log.err("Failed to init GLFW!", .{});
         return;
     };
-    glfw.windowHint(glfw.ContextVersionMajor, 3);
+    glfw.windowHint(glfw.ContextVersionMajor, 4);
     glfw.windowHint(glfw.ContextVersionMinor, 3);
     glfw.windowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile);
     // glfw.windowHint(glfw.OpenGLForwardCompat, glfw.GLTrue); for macos
@@ -88,38 +87,17 @@ pub fn main() !void {
     const style = imgui.ImGui_GetStyle();
     style.*.WindowRounding = 6.0;
 
-    // Opengl Shaders
-    var shader = Shader.new();
-
-    if (shader == null) {
-        std.log.err("Failed to create shader!", .{});
-        return;
-    }
-
-    shader.?.use();
+    // Opengl Context
+    var oc = try OpenGLContext.init();
+    oc.shader.use();
 
     gl.glEnable(gl.GL_DEPTH_TEST);
-
-    // Init OpenCL
-    var platform: cl.cl_platform_id = undefined;
-    _ = cl.clGetPlatformIDs(1, &platform, null);
-
-    var devices: cl.cl_device_id = undefined;
-    _ = cl.clGetDeviceIDs(platform, cl.CL_DEVICE_TYPE_GPU, 1, &devices, null);
-
-    var device_name: [256]u8 = undefined;
-    @memset(device_name[0..256], 0);
-    _ = cl.clGetDeviceInfo(devices, cl.CL_DEVICE_NAME, device_name.len, &device_name, null);
-    config.console.log("Using gpu: {s}", .{device_name}, .Info);
-
-    var cl_context = try OpenCLContext.init(alloc, devices);
-    defer cl_context.deinit();
 
     // World Init
     var world = World{
         .alloc = alloc,
         .chunks = undefined,
-        .cl_context = &cl_context,
+        .oc = &oc,
         .gen = undefined,
     };
 
@@ -153,13 +131,16 @@ pub fn main() !void {
 
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST_MIPMAP_NEAREST);
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST);
-    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_REPEAT);
-    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_BORDER);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_BORDER);
+
+    const border_col: [4]f32 = [4]f32{ 0.0, 0.0, 0.0, 0.0 };
+    gl.glTexParameterfv(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_BORDER_COLOR, &border_col);
 
     gl.glGenerateMipmap(gl.GL_TEXTURE_2D);
     stbi.stbi_image_free(pixels);
 
-    gl.glUniform1i(gl.glGetUniformLocation(shader.?.id, "uAtlas"), 0);
+    gl.glUniform1i(gl.glGetUniformLocation(oc.shader.id, "uAtlas"), 0);
 
     while (!glfw.windowShouldClose(w)) {
         processInput(w, &config);
@@ -185,7 +166,7 @@ pub fn main() !void {
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
 
         // draw
-        shader.?.use();
+        oc.shader.use();
 
         // matrices :)
         const proj = math.Mat4.createPerspective(config.cam.fov_rad, config.cam.aspect_ratio, config.cam.near_clip, config.cam.far_clip);
@@ -197,10 +178,10 @@ pub fn main() !void {
         const view_flat = flattenMatrix(4, view.fields);
         //const model_flat = flattenMatrix(4, model.fields);
 
-        const projUni = gl.glGetUniformLocation(shader.?.id, "proj");
-        const viewUni = gl.glGetUniformLocation(shader.?.id, "view");
-        const modelUni = gl.glGetUniformLocation(shader.?.id, "model");
-        const lightDirUni = gl.glGetUniformLocation(shader.?.id, "ldir");
+        const projUni = gl.glGetUniformLocation(oc.shader.id, "proj");
+        const viewUni = gl.glGetUniformLocation(oc.shader.id, "view");
+        const modelUni = gl.glGetUniformLocation(oc.shader.id, "model");
+        const lightDirUni = gl.glGetUniformLocation(oc.shader.id, "ldir");
 
         gl.glUniformMatrix4fv(projUni, 1, gl.GL_FALSE, &proj_flat);
         gl.glUniformMatrix4fv(viewUni, 1, gl.GL_FALSE, &view_flat);

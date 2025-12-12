@@ -6,7 +6,7 @@ const noize = @import("noize");
 const Camera = @import("../main.zig").Camera;
 const Chunk = @import("../world/chunk.zig").Chunk;
 const ChunkJob = @import("../threading/worker.zig").ChunkJob;
-const OpenCLContext = @import("../opencl/opencl.zig").OpenCLContext;
+const OpenGLContext = @import("../renderer/opengl.zig").OpenGLContext;
 const Face = @import("../world/block.zig").Face;
 const meshWorker = @import("../threading/worker.zig").meshWorker;
 const iVec3 = @import("../util.zig").iVec3;
@@ -27,7 +27,7 @@ const Hit = struct {
 pub const World = struct {
     alloc: std.mem.Allocator,
     chunks: std.AutoHashMap(u64, *Chunk),
-    cl_context: *OpenCLContext,
+    oc: *OpenGLContext,
     gen: *noize.Gen,
     chunk_radius: u32 = 8,
     max_chunk_height: u32 = 3,
@@ -51,11 +51,7 @@ pub const World = struct {
             .warp_strength = 20,
             .type = .Worley,
             .alloc = self.alloc,
-            .opencl = .{
-                .cl_context = self.cl_context.context,
-                .cl_queue = self.cl_context.queue,
-                .cl_devices = self.cl_context.devices,
-            },
+            .oc = self.oc,
         };
 
         try gen_ptr.init();
@@ -64,7 +60,7 @@ pub const World = struct {
 
         self.job_mutex = .{};
         self.chunks_mutex = .{};
-        self.job_queue = try .initCapacity(self.alloc, 5);
+        self.job_queue = try .initCapacity(self.alloc, 20);
         self.worker_thread = try std.Thread.spawn(.{}, meshWorker, .{self});
     }
 
