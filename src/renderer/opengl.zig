@@ -1,13 +1,12 @@
 const std = @import("std");
-
-const gl = @cImport({
-    @cInclude("glad/glad.h");
-});
+const gl = @cImport(@cInclude("glad/glad.h"));
 
 pub const OpenGLContext = struct {
     shader: Program,
+    alloc: std.mem.Allocator,
+    compute_shaders: std.StringHashMap(Program),
 
-    pub fn init() !OpenGLContext {
+    pub fn init(alloc: std.mem.Allocator) !OpenGLContext {
         // --- VERTEX SHADER ---
         const vsh_src = @embedFile("./vertex.glsl");
         const vsh = gl.glCreateShader(gl.GL_VERTEX_SHADER);
@@ -16,10 +15,10 @@ pub const OpenGLContext = struct {
         gl.glCompileShader(vsh);
 
         // check compilation
-        var sucess: c_int = 0;
-        gl.glGetShaderiv(vsh, gl.GL_COMPILE_STATUS, &sucess);
+        var success: c_int = 0;
+        gl.glGetShaderiv(vsh, gl.GL_COMPILE_STATUS, &success);
 
-        if (sucess == 0) {
+        if (success == 0) {
             var log: [512]u8 = undefined;
             @memset(&log, 0);
             gl.glGetShaderInfoLog(vsh, 512, null, &log);
@@ -36,9 +35,9 @@ pub const OpenGLContext = struct {
         gl.glCompileShader(fsh);
 
         // check compilation
-        gl.glGetShaderiv(fsh, gl.GL_COMPILE_STATUS, &sucess);
+        gl.glGetShaderiv(fsh, gl.GL_COMPILE_STATUS, &success);
 
-        if (sucess == 0) {
+        if (success == 0) {
             var log: [512]u8 = undefined;
             @memset(&log, 0);
             gl.glGetShaderInfoLog(fsh, 512, null, &log);
@@ -57,13 +56,26 @@ pub const OpenGLContext = struct {
 
         return OpenGLContext{
             .shader = p,
+            .alloc = alloc,
+            .compute_shaders = .init(alloc),
         };
     }
 
-    pub fn newComputeProgram(src: *[:0]const u8, name: []const u8) !Program {
+    pub fn deinit(self: *OpenGLContext) void {
+        var it = self.compute_shaders.valueIterator();
+        while (it.next()) |shader| {
+            shader.deinit();
+        }
+        self.compute_shaders.deinit();
+    }
+
+    pub fn newComputeProgram(self: *OpenGLContext, src: [*c]const [*c]const u8, name: []const u8) !void {
         const shader = try Shader.new(src);
-        defer gl.glDeleteShader(shader);
-        return try Program.new(name, [1]Shader{shader});
+        defer gl.glDeleteShader(shader.id);
+        var shaders = [1]Shader{shader};
+        const p = try Program.new(name, shaders[0..]);
+
+        try self.compute_shaders.put(name, p);
     }
 };
 
@@ -89,6 +101,10 @@ pub const Program = struct {
         };
     }
 
+    pub fn deinit(self: *Program) void {
+        gl.glReleaseProgram(self.id);
+    }
+
     pub fn use(self: *const Program) void {
         gl.glUseProgram(self.id);
     }
@@ -97,18 +113,17 @@ pub const Program = struct {
 pub const Shader = struct {
     id: c_uint,
 
-    pub fn new(src: *[:0]const u8) !Shader {
+    pub fn new(src: [*c]const [*c]const u8) !Shader {
         const shader = gl.glCreateShader(gl.GL_COMPUTE_SHADER);
-        gl.glShaderSource(shader, 1, &src.ptr, null);
+        gl.glShaderSource(shader, 1, src, null);
         gl.glCompileShader(shader);
 
         var success: c_int = 0;
-        var log: [512]u8 = undefined;
-        @memset(&log, 0);
-
         gl.glGetShaderiv(shader, gl.GL_COMPILE_STATUS, &success);
 
-        if (success != 0) {
+        if (success == 0) {
+            var log: [512]u8 = undefined;
+            @memset(&log, 0);
             gl.glGetShaderInfoLog(shader, 512, null, &log);
             std.log.err("Failed to compile shader:\n{s}", .{log});
             return error.ShaderCompilationFailed;

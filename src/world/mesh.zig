@@ -22,8 +22,8 @@ pub const ChunkMesh = struct {
         const mesh_ptr = try alloc.create(ChunkMesh); // TODO: add logging to console
         errdefer alloc.destroy(mesh_ptr);
 
-        mesh_ptr.vertices = try .initCapacity(alloc, 8192); // Random value, seems good enough
-        mesh_ptr.indices = try .initCapacity(alloc, 6 * 8192);
+        mesh_ptr.vertices = try .initCapacity(alloc, 2 * 8192); // Random value, seems good enough
+        mesh_ptr.indices = try .initCapacity(alloc, 12 * 8192);
         mesh_ptr.vao = 0;
         mesh_ptr.vbo = 0;
         mesh_ptr.ebo = 0;

@@ -11,11 +11,9 @@ const World = @import("../world/world.zig").World;
 const Block = @import("../world/block.zig").Block;
 const Face = @import("../world/block.zig").Face;
 const ChunkMesh = @import("../world/mesh.zig").ChunkMesh;
-const OpenCLContext = @import("../opencl/opencl.zig").OpenCLContext;
+// const OpenGLContext = @import("../renderer/opengl.zig").OpenGLContext;
 const Vertex = @import("../world/mesh.zig").Vertex;
 const Chunk = @import("../world/chunk.zig").Chunk;
-
-const cl = @import("cl").cl;
 
 pub const Job = enum {
     Generate,
@@ -34,14 +32,14 @@ pub fn meshWorker(
 ) !void {
     while (!world.worker_done.load(.acquire)) {
         world.job_mutex.?.lock();
-        const maybe_job = if (world.job_queue.?.items.len > 0) world.job_queue.?.orderedRemove(0) else null;
+        const maybe_job = world.job_queue.?.pop();
         world.job_mutex.?.unlock();
 
         if (maybe_job) |job| {
             if (job.kind == .Generate) {
                 for (job.chunks) |hash| {
                     const chunk = world.chunks.get(hash);
-                    if (chunk != null) chunk.?.generate(world.gen);
+                    if (chunk != null) chunk.?.generate();
                 }
 
                 const borderJob = ChunkJob{
@@ -55,7 +53,10 @@ pub fn meshWorker(
             } else if (job.kind == .UpdateBorders) {
                 for (job.chunks) |hash| {
                     const chunk = world.chunks.get(hash);
-                    if (chunk != null) chunk.?.updateBorders();
+                    if (chunk != null) {
+                        const neighbours = try world.get_neighbours(hash);
+                        chunk.?.borders(neighbours);
+                    }
                 }
 
                 const meshJob = ChunkJob{
@@ -123,14 +124,9 @@ pub fn meshWorker(
                         world.chunks_mutex.unlock();
                         continue;
                     }
-                    const neighbours = try world.get_neighbours(chunk.?.pos.hash());
                     world.chunks_mutex.unlock();
 
-                    try chunk.?.buildMesh(
-                        world.alloc,
-                        neighbours,
-                        world.cl_context,
-                    );
+                    try chunk.?.mesh(world.alloc);
                 }
 
                 world.alloc.free(job.chunks);

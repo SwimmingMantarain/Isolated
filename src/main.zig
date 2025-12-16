@@ -7,20 +7,9 @@ const World = @import("./world/world.zig").World;
 const Console = @import("./ui/dev/console.zig").Console;
 const OpenGLContext = @import("./renderer/opengl.zig").OpenGLContext;
 
-const cglfw = @cImport({
-    @cInclude("GLFW/glfw3.h");
-});
-
-const gl = @cImport({
-    @cInclude("glad/glad.h");
-});
-
-const stbi = @cImport({
-    @cInclude("stb/stb_image.h");
-});
-
-const cl = @import("cl").cl;
-
+const cglfw = @cImport(@cInclude("GLFW/glfw3.h"));
+const gl = @cImport(@cInclude("glad/glad.h"));
+const stbi = @cImport(@cInclude("stb/stb_image.h"));
 const imgui = @cImport({
     @cInclude("dcimgui.h");
     @cInclude("backends/dcimgui_impl_glfw.h");
@@ -36,6 +25,7 @@ pub fn main() !void {
     const cam = Camera{ .aspect_ratio = 800.0 / 600.0 };
     const console = try Console.init(alloc);
     var config = Config{ .cam = cam, .console = console };
+    defer config.console.deinit();
     updateCamDir(&config.cam);
 
     glfw.init() catch {
@@ -88,7 +78,7 @@ pub fn main() !void {
     style.*.WindowRounding = 6.0;
 
     // Opengl Context
-    var oc = try OpenGLContext.init();
+    var oc = try OpenGLContext.init(alloc);
     oc.shader.use();
 
     gl.glEnable(gl.GL_DEPTH_TEST);
@@ -97,14 +87,9 @@ pub fn main() !void {
     var world = World{
         .alloc = alloc,
         .chunks = undefined,
-        .oc = &oc,
-        .gen = undefined,
     };
 
-    world.init() catch {
-        std.log.err("Failed to create worker thread!", .{});
-        return;
-    };
+    try world.init();
 
     var last_chunk_x: i32 = @intFromFloat(@floor(config.cam.pos.x / 32));
     var last_chunk_z: i32 = @intFromFloat(@floor(config.cam.pos.z / 32));
@@ -242,7 +227,6 @@ pub fn main() !void {
         glfw.pollEvents();
     }
 
-    config.console.deinit();
     world.deinit();
     glfw.destroyWindow(w);
     glfw.terminate();
@@ -287,7 +271,7 @@ const Config = struct {
     break_block: bool = false,
     place_block: bool = false,
     last_block_action: f64 = 0.0,
-    block_cooldown: f64 = 0.001,
+    block_cooldown: f64 = 0.05,
     window_focused: bool = false,
     console: Console,
 };

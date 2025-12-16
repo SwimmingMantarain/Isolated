@@ -6,7 +6,7 @@ const noize = @import("noize");
 const Camera = @import("../main.zig").Camera;
 const Chunk = @import("../world/chunk.zig").Chunk;
 const ChunkJob = @import("../threading/worker.zig").ChunkJob;
-const OpenGLContext = @import("../renderer/opengl.zig").OpenGLContext;
+// const OpenGLContext = @import("../renderer/opengl.zig").OpenGLContext;
 const Face = @import("../world/block.zig").Face;
 const meshWorker = @import("../threading/worker.zig").meshWorker;
 const iVec3 = @import("../util.zig").iVec3;
@@ -27,10 +27,11 @@ const Hit = struct {
 pub const World = struct {
     alloc: std.mem.Allocator,
     chunks: std.AutoHashMap(u64, *Chunk),
-    oc: *OpenGLContext,
-    gen: *noize.Gen,
-    chunk_radius: u32 = 8,
-    max_chunk_height: u32 = 3,
+    // gl_context: *OpenGLContext,
+    // noize: *noize.Noize,
+    // gen: *noize.Worley,
+    chunk_radius: u32 = 6,
+    max_chunk_height: u32 = 1,
 
     // multithreading shit
     chunks_mutex: std.Thread.Mutex = .{},
@@ -43,20 +44,25 @@ pub const World = struct {
         self.chunks = .init(self.alloc);
 
         // noize
-        var gen_ptr = try self.alloc.create(noize.Gen);
-        gen_ptr.* = .{
-            .seed = 6942069, // noice
-            .sharpness = 20,
-            .zoom = 200,
-            .warp_strength = 20,
-            .type = .Worley,
-            .alloc = self.alloc,
-            .oc = self.oc,
-        };
-
-        try gen_ptr.init();
-
-        self.gen = gen_ptr;
+        // var noize_ptr = try self.alloc.create(noize.Noize);
+        // errdefer self.alloc.destroy(noize_ptr);
+        // try noize_ptr.init(self.alloc, .Worley);
+        // errdefer noize_ptr.deinit(self.alloc);
+        //
+        // var gen_ptr: *noize.Worley = @ptrCast(@alignCast(noize_ptr.gen.?));
+        // try gen_ptr.init(6942069, 20, 200, 20);
+        //
+        // self.noize = noize_ptr;
+        // self.gen = gen_ptr;
+        //
+        // const axis_src = @embedFile("../compute/axis_cols.glsl");
+        // const cull_src = @embedFile("../compute/face_cull.glsl");
+        // const greedy_src = @embedFile("../compute/greedy_mesh.glsl");
+        //
+        // // meshing compute shaders
+        // try self.gl_context.newComputeProgram(&axis_src.ptr, "Axis Cols");
+        // try self.gl_context.newComputeProgram(&cull_src.ptr, "Face Cull");
+        // try self.gl_context.newComputeProgram(&greedy_src.ptr, "Greedy Mesh");
 
         self.job_mutex = .{};
         self.chunks_mutex = .{};
@@ -68,6 +74,9 @@ pub const World = struct {
         self.worker_done.store(true, .seq_cst);
         self.worker_thread.?.join();
 
+        // self.noize.deinit(self.alloc);
+        // self.alloc.destroy(self.noize);
+
         for (self.job_queue.?.items) |job| {
             for (job.chunks) |hash| {
                 const chunk = self.chunks.fetchRemove(hash).?.value;
@@ -75,9 +84,6 @@ pub const World = struct {
             }
         }
         self.job_queue.?.deinit(self.alloc);
-
-        self.gen.deinit();
-        self.alloc.destroy(self.gen);
 
         var it = self.chunks.valueIterator();
         while (it.next()) |chunk_ptr_ptr| {
