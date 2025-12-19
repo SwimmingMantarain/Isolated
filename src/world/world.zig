@@ -391,8 +391,6 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
 
             chunk_ptr.blocks[hit.?.local_coords[1] + (32 * hit.?.local_coords[0]) + (32 * 32 * hit.?.local_coords[2])] = .Air;
 
-            chunk_ptr.mutex.lock();
-            defer chunk_ptr.mutex.unlock();
             if (chunk_ptr.state == .Idle) {
                 chunk_ptr.state = .ToMesh;
 
@@ -427,8 +425,6 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
 
             chunk_ptr.blocks[hit.?.prev_coords[1] + (32 * hit.?.prev_coords[0]) + (32 * 32 * hit.?.prev_coords[2])] = .Dirt;
 
-            chunk_ptr.mutex.lock();
-            defer chunk_ptr.mutex.unlock();
             if (chunk_ptr.state == .Idle) {
                 chunk_ptr.state = .ToMesh;
 
