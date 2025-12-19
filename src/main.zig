@@ -37,11 +37,14 @@ pub fn main() !void {
     glfw.windowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile);
     // glfw.windowHint(glfw.OpenGLForwardCompat, glfw.GLTrue); for macos
 
+    defer glfw.terminate();
+
     const w = glfw.createWindow(800, 600, "Isolated Game", null, null) catch {
         std.log.err("Failed to create GLFW window!", .{});
         glfw.terminate();
         return;
     };
+    defer glfw.destroyWindow(w);
 
     glfw.makeContextCurrent(w);
 
@@ -84,20 +87,9 @@ pub fn main() !void {
     gl.glEnable(gl.GL_DEPTH_TEST);
 
     // World Init
-    var world = World{
-        .alloc = alloc,
-        .chunks = undefined,
-    };
-
-    try world.init();
-
-    var last_chunk_x: i32 = @intFromFloat(@floor(config.cam.pos.x / 32));
-    var last_chunk_z: i32 = @intFromFloat(@floor(config.cam.pos.z / 32));
-
-    world.load_chunks(&config.cam) catch {
-        std.log.err("Failed to load initial chunks!", .{});
-        return;
-    };
+    var world = try World(4, 1).init(alloc, &config.cam);
+    defer world.deinit();
+    try world.load_chunks(&config.cam);
 
     // Load texture atlas and send to opengl
     var atlas_w: c_int = 0;
@@ -127,6 +119,9 @@ pub fn main() !void {
 
     gl.glUniform1i(gl.glGetUniformLocation(oc.shader.id, "uAtlas"), 0);
 
+    var last_chunk_x: i32 = @intFromFloat(@floor(config.cam.pos.x / 32));
+    var last_chunk_z: i32 = @intFromFloat(@floor(config.cam.pos.z / 32));
+
     while (!glfw.windowShouldClose(w)) {
         processInput(w, &config);
 
@@ -150,18 +145,13 @@ pub fn main() !void {
         gl.glClearColor(0.2, 0.3, 0.3, 1.0);
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
 
-        // draw
-        oc.shader.use();
-
         // matrices :)
         const proj = math.Mat4.createPerspective(config.cam.fov_rad, config.cam.aspect_ratio, config.cam.near_clip, config.cam.far_clip);
         const view = math.Mat4.createLookAt(config.cam.pos, config.cam.target, config.cam.up);
         const light = [3]f32{ 0.2, -0.8, 0.3 }; // above left
-        //const model = math.Mat4.createAngleAxis(math.Vec3.new(1.0, 0.0, 0.0), @floatCast(glfw.getTime()));
 
         const proj_flat = flattenMatrix(4, proj.fields);
         const view_flat = flattenMatrix(4, view.fields);
-        //const model_flat = flattenMatrix(4, model.fields);
 
         const projUni = gl.glGetUniformLocation(oc.shader.id, "proj");
         const viewUni = gl.glGetUniformLocation(oc.shader.id, "view");
@@ -171,48 +161,56 @@ pub fn main() !void {
         gl.glUniformMatrix4fv(projUni, 1, gl.GL_FALSE, &proj_flat);
         gl.glUniformMatrix4fv(viewUni, 1, gl.GL_FALSE, &view_flat);
         gl.glUniform3fv(lightDirUni, 1, &light);
-        //gl.glUniformMatrix4fv(modelUni, 1, gl.GL_FALSE, &model_flat);
+
+        // draw
+        oc.shader.use();
 
         // update chunks
         const current_chunk_x: i32 = @intFromFloat(@floor(config.cam.pos.x / 32));
         const current_chunk_z: i32 = @intFromFloat(@floor(config.cam.pos.z / 32));
 
         if (current_chunk_x != last_chunk_x or current_chunk_z != last_chunk_z) {
-            world.load_chunks(&config.cam) catch break;
-            world.unload_chunks(&config.cam) catch break;
+            try world.load_chunks(&config.cam);
+            try world.unload_chunks(&config.cam);
             last_chunk_x = current_chunk_x;
             last_chunk_z = current_chunk_z;
         }
 
-        // Upload any chunks that are ready
-        var it_upload = world.chunks.valueIterator();
-        while (it_upload.next()) |chunk_ptr_ptr| {
-            const chunk_ptr = chunk_ptr_ptr.*;
-            chunk_ptr.mutex.lock();
-            if (chunk_ptr.state == .ToUpload) {
-                chunk_ptr.uploadMesh();
+        // Upload chunks that are ready
+        while (world.done_queue.pop()) |chunk| {
+            if (chunk.state == .ToUpload) {
+                chunk.uploadMesh();
+                _ = world.set_chunk(current_chunk_x, current_chunk_z, chunk.pos.x, chunk.pos.y, chunk.pos.z, chunk);
             }
-            chunk_ptr.mutex.unlock();
         }
 
-        // chunks
-        var it = world.chunks.valueIterator();
-        while (it.next()) |chunk_ptr_ptr| {
-            const chunk_ptr = chunk_ptr_ptr.*;
+        // Check for chunks to destroy
+        world.chunks_mutex.lock();
+        for (world.chunks) |chunk| {
+            if (chunk) |c| {
+                if (c.state == .Destroying) {
+                    _ = world.set_chunk(current_chunk_x, current_chunk_z, c.pos.x, c.pos.y, c.pos.z, null);
+                    c.destroy(alloc);
+                }
+            }
+        }
 
+        for (world.chunks) |c| {
+            const chunk = if (c) |chunk| chunk else continue;
             const chunk_offset = math.Mat4.createTranslation(math.Vec3.new(
-                @as(f32, @floatFromInt(chunk_ptr.pos.x)) * 32.0,
-                @as(f32, @floatFromInt(chunk_ptr.pos.y)) * 32.0,
-                @as(f32, @floatFromInt(chunk_ptr.pos.z)) * 32.0,
+                @as(f32, @floatFromInt(chunk.pos.x)) * 32.0,
+                @as(f32, @floatFromInt(chunk.pos.y)) * 32.0,
+                @as(f32, @floatFromInt(chunk.pos.z)) * 32.0,
             ));
 
             const model_flat = flattenMatrix(4, chunk_offset.fields);
             gl.glUniformMatrix4fv(modelUni, 1, gl.GL_FALSE, &model_flat);
 
             // Draw chunk
-            gl.glBindVertexArray(chunk_ptr.fmesh.vao);
-            gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk_ptr.fmesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
+            gl.glBindVertexArray(chunk.fmesh.vao);
+            gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk.fmesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
         }
+        world.chunks_mutex.unlock();
         gl.glBindVertexArray(0);
 
         // redraw imgui
@@ -226,10 +224,6 @@ pub fn main() !void {
         glfw.swapBuffers(w);
         glfw.pollEvents();
     }
-
-    world.deinit();
-    glfw.destroyWindow(w);
-    glfw.terminate();
 }
 
 fn flattenMatrix(comptime N: usize, input: [N][N]f32) [N * N]f32 {
@@ -313,7 +307,7 @@ fn processInput(w: ?*glfw.Window, config: *Config) void {
     config.f_was_pressed = f_pressed;
 
     // Camera input
-    const speed: f32 = 1.0;
+    const speed: f32 = 0.3;
     const forward = math.Vec3.sub(config.cam.target, config.cam.pos).normalize();
     const right = math.Vec3.cross(forward, config.cam.up).normalize();
 

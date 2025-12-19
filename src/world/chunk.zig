@@ -17,10 +17,17 @@ pub const ChunkState = enum {
     New,
     ToMesh,
     ToUpload,
+    ToJob,
     Meshing,
     Uploading,
     Generating,
     Destroying,
+};
+
+pub const TargetMap = enum {
+    Idle,
+    Cache,
+    Job,
 };
 
 const FACE_INDICES = [_]u32{ 0, 1, 2, 0, 2, 3 };
@@ -32,6 +39,7 @@ pub const Chunk = struct {
     bmesh: *ChunkMesh,
     pos: iVec3,
     state: ChunkState,
+    target_map: TargetMap,
     mutex: std.Thread.Mutex,
 
     pub fn create(alloc: std.mem.Allocator, pos: iVec3) !*Chunk {
@@ -44,6 +52,7 @@ pub const Chunk = struct {
         chunk_ptr.bmesh = try ChunkMesh.create(alloc);
         chunk_ptr.pos = pos;
         chunk_ptr.state = .New;
+        chunk_ptr.target_map = .Job;
         chunk_ptr.mutex = .{};
 
         return chunk_ptr;

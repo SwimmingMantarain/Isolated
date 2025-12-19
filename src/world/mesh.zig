@@ -47,21 +47,17 @@ pub const ChunkMesh = struct {
 
         if (self.vbo == 0) gl.glGenBuffers(1, &self.vbo);
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vbo);
-        gl.glBufferData(
-            gl.GL_ARRAY_BUFFER,
-            @intCast(self.vertices.items.len * @sizeOf(Vertex)),
-            self.vertices.items.ptr,
-            gl.GL_DYNAMIC_DRAW,
-        );
+
+        const vbo_size: c_long = @intCast(self.vertices.items.len * @sizeOf(Vertex));
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, vbo_size, null, gl.GL_DYNAMIC_DRAW);
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, vbo_size, self.vertices.items.ptr, gl.GL_DYNAMIC_DRAW);
 
         if (self.ebo == 0) gl.glGenBuffers(1, &self.ebo);
         gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.ebo);
-        gl.glBufferData(
-            gl.GL_ELEMENT_ARRAY_BUFFER,
-            @intCast(self.indices.items.len * @sizeOf(u32)),
-            self.indices.items.ptr,
-            gl.GL_DYNAMIC_DRAW,
-        );
+
+        const ebo_size: c_long = @intCast(self.indices.items.len * @sizeOf(u32));
+        gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, ebo_size, null, gl.GL_DYNAMIC_DRAW);
+        gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, ebo_size, self.indices.items.ptr, gl.GL_DYNAMIC_DRAW);
 
         // vertices
         gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Vertex), null);

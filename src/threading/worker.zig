@@ -11,7 +11,6 @@ const World = @import("../world/world.zig").World;
 const Block = @import("../world/block.zig").Block;
 const Face = @import("../world/block.zig").Face;
 const ChunkMesh = @import("../world/mesh.zig").ChunkMesh;
-// const OpenGLContext = @import("../renderer/opengl.zig").OpenGLContext;
 const Vertex = @import("../world/mesh.zig").Vertex;
 const Chunk = @import("../world/chunk.zig").Chunk;
 
@@ -19,129 +18,67 @@ pub const Job = enum {
     Generate,
     Remesh,
     UpdateBorders,
-    Destroy,
 };
 
 pub const ChunkJob = struct {
-    chunks: []u64, // chunk hashes
+    chunks: []*Chunk,
     kind: Job,
 };
 
-pub fn meshWorker(
-    world: *World,
-) !void {
-    while (!world.worker_done.load(.acquire)) {
-        world.job_mutex.?.lock();
-        const maybe_job = world.job_queue.?.pop();
-        world.job_mutex.?.unlock();
+pub fn chunker(world: *World(4, 1)) !void {
+    while (!world.chunker_done.load(.acquire)) {
+        const maybe_job = world.job_queue.pop() orelse null;
 
         if (maybe_job) |job| {
-            if (job.kind == .Generate) {
-                for (job.chunks) |hash| {
-                    const chunk = world.chunks.get(hash);
-                    if (chunk != null) chunk.?.generate();
-                }
+            switch (job.kind) {
+                .Generate => {
+                    for (job.chunks) |chunk| chunk.generate();
 
-                const borderJob = ChunkJob{
-                    .chunks = job.chunks,
-                    .kind = .UpdateBorders,
-                };
+                    const bj = try world.alloc.create(ChunkJob);
+                    bj.* = .{
+                        .chunks = job.chunks,
+                        .kind = .UpdateBorders,
+                    };
 
-                world.job_mutex.?.lock();
-                defer world.job_mutex.?.unlock();
-                try world.job_queue.?.append(world.alloc, borderJob);
-            } else if (job.kind == .UpdateBorders) {
-                for (job.chunks) |hash| {
-                    const chunk = world.chunks.get(hash);
-                    if (chunk != null) {
-                        const neighbours = try world.get_neighbours(hash);
-                        chunk.?.borders(neighbours);
-                    }
-                }
+                    world.job_queue.loop_push(bj);
+                },
+                .UpdateBorders => {
+                    var chunks = try std.ArrayList(*Chunk).initCapacity(world.alloc, 32);
+                    defer chunks.deinit(world.alloc);
 
-                const meshJob = ChunkJob{
-                    .chunks = job.chunks,
-                    .kind = .Remesh,
-                };
+                    for (job.chunks) |chunk| {
+                        const neighbours = try world.get_neighbours(chunk);
+                        defer world.alloc.free(neighbours);
+                        chunk.borders(neighbours);
 
-                // Collect valid neighbors for remeshing
-                var neighbour_set = std.AutoHashMap(u64, *Chunk).init(world.alloc);
-                defer neighbour_set.deinit();
+                        try chunks.append(world.alloc, chunk);
+                        chunk.mutex.lock();
+                        chunk.state = .ToMesh;
+                        chunk.mutex.unlock();
 
-                world.chunks_mutex.lock();
-                for (job.chunks) |hash| {
-                    const chunk = world.chunks.get(hash);
-                    if (chunk == null) continue;
-
-                    const neighbours = try world.get_neighbours(chunk.?.pos.hash());
-                    for (neighbours) |maybe_neighbour| {
-                        if (maybe_neighbour) |neighbour| {
-                            var in_job = false;
-                            for (job.chunks) |hashh| {
-                                if (hashh == neighbour.pos.hash()) {
-                                    in_job = true;
-                                    break;
-                                }
-                            }
-
-                            if (!in_job) {
-                                try neighbour_set.put(neighbour.pos.hash(), neighbour);
-                            }
+                        for (neighbours) |neigh_chunk| {
+                            if (neigh_chunk == null) continue;
+                            neigh_chunk.?.state = .ToMesh;
+                            try chunks.append(world.alloc, neigh_chunk.?);
                         }
                     }
-                    world.alloc.free(neighbours);
-                }
-                world.chunks_mutex.unlock();
 
-                if (neighbour_set.count() > 0) {
-                    var mesh_neighbours = try world.alloc.alloc(u64, neighbour_set.count());
-                    var it = neighbour_set.valueIterator();
-                    var i: usize = 0;
-                    while (it.next()) |chunk_ptr| {
-                        mesh_neighbours[i] = chunk_ptr.*.pos.hash();
-                        chunk_ptr.*.state = .ToMesh;
-                        i += 1;
-                    }
-
-                    const pendingMeshJob = ChunkJob{
-                        .chunks = mesh_neighbours,
+                    const mj = try world.alloc.create(ChunkJob);
+                    mj.* = .{
+                        .chunks = try chunks.toOwnedSlice(world.alloc),
                         .kind = .Remesh,
                     };
 
-                    world.job_mutex.?.lock();
-                    defer world.job_mutex.?.unlock();
-                    try world.job_queue.?.append(world.alloc, pendingMeshJob);
-                }
+                    world.job_queue.loop_push(mj);
+                },
+                .Remesh => {
+                    for (job.chunks) |chunk| {
+                        try chunk.mesh(world.alloc);
 
-                world.job_mutex.?.lock();
-                defer world.job_mutex.?.unlock();
-                try world.job_queue.?.append(world.alloc, meshJob);
-            } else if (job.kind == .Remesh) {
-                for (job.chunks) |hash| {
-                    world.chunks_mutex.lock();
-                    const chunk = world.chunks.get(hash);
-                    if (chunk == null) {
-                        world.chunks_mutex.unlock();
-                        continue;
+                        world.done_queue.loop_push(chunk);
                     }
-                    world.chunks_mutex.unlock();
-
-                    try chunk.?.mesh(world.alloc);
-                }
-
-                world.alloc.free(job.chunks);
-            } else { // destroy
-                world.chunks_mutex.lock();
-                for (job.chunks) |hash| {
-                    const kv = world.chunks.fetchRemove(hash) orelse continue;
-                    const chunk = kv.value;
-                    chunk.mutex.lock(); // wait until someone is done
-                    chunk.mutex.unlock();
-                    chunk.destroy(world.alloc);
-                }
-                world.chunks_mutex.unlock();
-
-                world.alloc.free(job.chunks);
+                    world.alloc.free(job.chunks);
+                },
             }
         } else {
             std.Thread.sleep(5 * std.time.ns_per_ms);
