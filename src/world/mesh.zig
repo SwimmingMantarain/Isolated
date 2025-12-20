@@ -32,9 +32,16 @@ pub const ChunkMesh = struct {
     }
 
     pub fn destroy(self: *ChunkMesh, alloc: std.mem.Allocator) void {
-        gl.glDeleteVertexArrays(1, &self.vao);
-        gl.glDeleteBuffers(1, &self.vbo);
-        gl.glDeleteBuffers(1, &self.ebo);
+        // Only delete OpenGL resources if they were created
+        if (self.vao != 0) {
+            gl.glDeleteVertexArrays(1, &self.vao);
+        }
+        if (self.vbo != 0) {
+            gl.glDeleteBuffers(1, &self.vbo);
+        }
+        if (self.ebo != 0) {
+            gl.glDeleteBuffers(1, &self.ebo);
+        }
 
         self.vertices.deinit(alloc);
         self.indices.deinit(alloc);

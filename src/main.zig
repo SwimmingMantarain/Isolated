@@ -4,6 +4,7 @@ const glfw = @import("glfw");
 const noize = @import("noize");
 
 const World = @import("./world/world.zig").World;
+const Chunk = @import("./world/chunk.zig").Chunk;
 const Console = @import("./ui/dev/console.zig").Console;
 const OpenGLContext = @import("./renderer/opengl.zig").OpenGLContext;
 
@@ -177,38 +178,30 @@ pub fn main() !void {
         }
 
         // Upload chunks that are ready
-        while (world.done_queue.pop()) |chunk| {
+        world.chunks_mutex.lock();
+        while (world.done_queue.pop()) |hash| {
+            var chunk = world.chunks.get(hash) orelse continue;
+            chunk.mutex.lock();
             if (chunk.state == .ToUpload) {
                 chunk.uploadMesh();
-                _ = world.set_chunk(current_chunk_x, current_chunk_z, chunk.pos.x, chunk.pos.y, chunk.pos.z, chunk);
             }
+            chunk.mutex.unlock();
         }
 
-        // Check for chunks to destroy
-        world.chunks_mutex.lock();
-        for (world.chunks) |chunk| {
-            if (chunk) |c| {
-                if (c.state == .Destroying) {
-                    _ = world.set_chunk(current_chunk_x, current_chunk_z, c.pos.x, c.pos.y, c.pos.z, null);
-                    c.destroy(alloc);
-                }
-            }
-        }
-
-        for (world.chunks) |c| {
-            const chunk = if (c) |chunk| chunk else continue;
+        var chunks_iter = world.chunks.valueIterator();
+        while (chunks_iter.next()) |chunk| {
             const chunk_offset = math.Mat4.createTranslation(math.Vec3.new(
-                @as(f32, @floatFromInt(chunk.pos.x)) * 32.0,
-                @as(f32, @floatFromInt(chunk.pos.y)) * 32.0,
-                @as(f32, @floatFromInt(chunk.pos.z)) * 32.0,
+                @as(f32, @floatFromInt(chunk.*.pos.x)) * 32.0,
+                @as(f32, @floatFromInt(chunk.*.pos.y)) * 32.0,
+                @as(f32, @floatFromInt(chunk.*.pos.z)) * 32.0,
             ));
 
             const model_flat = flattenMatrix(4, chunk_offset.fields);
             gl.glUniformMatrix4fv(modelUni, 1, gl.GL_FALSE, &model_flat);
 
             // Draw chunk
-            gl.glBindVertexArray(chunk.fmesh.vao);
-            gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk.fmesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
+            gl.glBindVertexArray(chunk.*.fmesh.vao);
+            gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk.*.fmesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
         }
         world.chunks_mutex.unlock();
         gl.glBindVertexArray(0);

@@ -17,17 +17,10 @@ pub const ChunkState = enum {
     New,
     ToMesh,
     ToUpload,
-    ToJob,
     Meshing,
     Uploading,
     Generating,
     Destroying,
-};
-
-pub const TargetMap = enum {
-    Idle,
-    Cache,
-    Job,
 };
 
 const FACE_INDICES = [_]u32{ 0, 1, 2, 0, 2, 3 };
@@ -39,7 +32,6 @@ pub const Chunk = struct {
     bmesh: *ChunkMesh,
     pos: iVec3,
     state: ChunkState,
-    target_map: TargetMap,
     mutex: std.Thread.Mutex,
 
     pub fn create(alloc: std.mem.Allocator, pos: iVec3) !*Chunk {
@@ -52,15 +44,16 @@ pub const Chunk = struct {
         chunk_ptr.bmesh = try ChunkMesh.create(alloc);
         chunk_ptr.pos = pos;
         chunk_ptr.state = .New;
-        chunk_ptr.target_map = .Job;
         chunk_ptr.mutex = .{};
 
         return chunk_ptr;
     }
 
     pub fn destroy(self: *Chunk, alloc: std.mem.Allocator) void {
+        self.mutex.lock();
         self.fmesh.destroy(alloc);
         self.bmesh.destroy(alloc);
+        self.mutex.unlock();
         alloc.destroy(self);
     }
 
@@ -102,6 +95,8 @@ pub const Chunk = struct {
     ) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        if (self.state == .Destroying) return;
 
         self.state = .Meshing;
 
@@ -250,6 +245,8 @@ pub const Chunk = struct {
     }
 
     pub fn uploadMesh(self: *Chunk) void {
+        if (self.state == .Destroying) return;
+
         self.state = .Uploading;
 
         self.bmesh.upload();
@@ -264,6 +261,8 @@ pub const Chunk = struct {
     pub fn borders(self: *Chunk, neighbours: []?*Chunk) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        if (self.state == .Destroying) return;
 
         @memset(&self.border_blocks, .Air);
 
