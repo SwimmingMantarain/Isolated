@@ -3,19 +3,14 @@ const math = @import("zlm").as(f32);
 const glfw = @import("glfw");
 const noize = @import("noize");
 
-const Shader = @import("./shader.zig").Shader;
-const World = @import("./worldgen/world.zig").World;
+const World = @import("./world/world.zig").World;
+const Chunk = @import("./world/chunk.zig").Chunk;
+const Console = @import("./ui/dev/console.zig").Console;
+const OpenGLContext = @import("./renderer/opengl.zig").OpenGLContext;
 
-const cglfw = @cImport({
-    @cInclude("GLFW/glfw3.h");
-});
-
-const gl = @cImport({
-    @cInclude("glad/glad.h");
-});
-
-const cl = @import("cl").cl;
-
+const cglfw = @cImport(@cInclude("GLFW/glfw3.h"));
+const gl = @cImport(@cInclude("glad/glad.h"));
+const stbi = @cImport(@cInclude("stb/stb_image.h"));
 const imgui = @cImport({
     @cInclude("dcimgui.h");
     @cInclude("backends/dcimgui_impl_glfw.h");
@@ -29,26 +24,30 @@ pub fn main() !void {
 
     // GLFW & OpenGL Init
     const cam = Camera{ .aspect_ratio = 800.0 / 600.0 };
-    var config = Config{ .cam = cam };
+    const console = try Console.init(alloc);
+    var config = Config{ .cam = cam, .console = console };
+    defer config.console.deinit();
     updateCamDir(&config.cam);
 
     glfw.init() catch {
         std.log.err("Failed to init GLFW!", .{});
         return;
     };
-    glfw.windowHint(glfw.ContextVersionMajor, 3);
+    glfw.windowHint(glfw.ContextVersionMajor, 4);
     glfw.windowHint(glfw.ContextVersionMinor, 3);
     glfw.windowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile);
     // glfw.windowHint(glfw.OpenGLForwardCompat, glfw.GLTrue); for macos
+
+    defer glfw.terminate();
 
     const w = glfw.createWindow(800, 600, "Isolated Game", null, null) catch {
         std.log.err("Failed to create GLFW window!", .{});
         glfw.terminate();
         return;
     };
+    defer glfw.destroyWindow(w);
 
     glfw.makeContextCurrent(w);
-    glfw.swapInterval(0);
 
     const loader = @as(gl.GLADloadproc, @ptrCast(&cglfw.glfwGetProcAddress));
     if (gl.gladLoadGLLoader(loader) == 0) {
@@ -68,7 +67,8 @@ pub fn main() !void {
     defer imgui.ImGui_DestroyContext(null);
 
     const imio = imgui.ImGui_GetIO();
-    imio.*.ConfigFlags = imgui.ImGuiConfigFlags_NavEnableKeyboard;
+    imio.*.ConfigFlags |= imgui.ImGuiConfigFlags_NavEnableKeyboard;
+    imio.*.ConfigFlags |= imgui.ImGuiConfigFlags_DockingEnable;
 
     imgui.ImGui_StyleColorsDark(null);
 
@@ -78,136 +78,52 @@ pub fn main() !void {
     _ = imgui.cImGui_ImplOpenGL3_InitEx("#version 330");
     defer imgui.cImGui_ImplOpenGL3_Shutdown();
 
-    // Opengl Shaders
-    var shader = Shader.new();
+    const style = imgui.ImGui_GetStyle();
+    style.*.WindowRounding = 6.0;
 
-    if (shader == null) {
-        std.log.err("Failed to create shader!", .{});
-        return;
-    }
+    // Opengl Context
+    var oc = try OpenGLContext.init(alloc);
+    oc.shader.use();
 
     gl.glEnable(gl.GL_DEPTH_TEST);
 
-    // Init OpenCL
-    var platform: cl.cl_platform_id = undefined;
-    _ = cl.clGetPlatformIDs(1, &platform, null);
-
-    var devices: cl.cl_device_id = undefined;
-    _ = cl.clGetDeviceIDs(platform, cl.CL_DEVICE_TYPE_GPU, 1, &devices, null);
-
-    var device_name: [256]u8 = undefined;
-    @memset(device_name[0..256], 0);
-    _ = cl.clGetDeviceInfo(devices, cl.CL_DEVICE_NAME, device_name.len, &device_name, null);
-    std.log.info("Using gpu: {s}", .{device_name});
-
-    // context
-    var err: cl.cl_int = undefined;
-    const cl_context = cl.clCreateContext(null, 1, &devices, null, null, &err);
-
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create CL context: {}", .{err});
-        return;
-    }
-    defer _ = cl.clReleaseContext(cl_context);
-
-    // command queue
-    const queue = cl.clCreateCommandQueue(cl_context, devices, 0, &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create command queue: {}", .{err});
-        return;
-    }
-    defer _ = cl.clReleaseCommandQueue(queue);
-
-    // Greedy Mesher
-    const mesh_kernel_src = @embedFile("./opencl/greedy_mesh.cl");
-    const mesh_program = cl.clCreateProgramWithSource(
-        cl_context,
-        1,
-        @ptrCast(@constCast(&mesh_kernel_src)),
-        null,
-        &err,
-    );
-    defer _ = cl.clReleaseProgram(mesh_program);
-
-    if (err != cl.CL_SUCCESS or mesh_program == null) {
-        std.log.err("Failed to compile kernel: {any}", .{err});
-        return;
-    }
-
-    err = cl.clBuildProgram(mesh_program, 1, &devices, null, null, null);
-    if (err != cl.CL_SUCCESS) {
-        var log_size: usize = 0;
-        _ = cl.clGetProgramBuildInfo(mesh_program, devices, cl.CL_PROGRAM_BUILD_LOG, 0, null, &log_size);
-        const buf = try alloc.alloc(u8, log_size);
-        defer alloc.free(buf);
-        _ = cl.clGetProgramBuildInfo(mesh_program, devices, cl.CL_PROGRAM_BUILD_LOG, log_size, buf.ptr, null);
-        std.log.err("Failed to build kernel: {s}", .{buf.ptr[0..buf.len]});
-        return;
-    }
-
-    const axis_kernel = cl.clCreateKernel(mesh_program, "build_axis_cols", &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create axis kernel: {any}", .{err});
-        return;
-    }
-
-    const cull_kernel = cl.clCreateKernel(mesh_program, "cull", &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create culler kernel: {any}", .{err});
-        return;
-    }
-
-    const greedy_kernel = cl.clCreateKernel(mesh_program, "greedy_mesh", &err);
-    if (err != cl.CL_SUCCESS) {
-        std.log.err("Failed to create mesh kernel: {any}", .{err});
-        return;
-    }
-
     // World Init
-    var world = World{
-        .alloc = alloc,
-        .chunks = undefined,
-        .cl_context = cl_context,
-        .cl_device = devices,
-        .cl_queue = queue,
-        .axis_kernel = axis_kernel,
-        .cull_kernel = cull_kernel,
-        .greedy_kernel = greedy_kernel,
-        .gen = undefined,
-    };
+    var world = try World(4, 1).init(alloc, &config.cam);
+    defer world.deinit();
+    try world.load_chunks(&config.cam);
 
-    world.init() catch {
-        std.log.err("Failed to create worker thread!", .{});
-        return;
-    };
+    // Load texture atlas and send to opengl
+    var atlas_w: c_int = 0;
+    var atlas_h: c_int = 0;
+    var atlas_col_channels: c_int = 0;
+
+    // FIXME: use a proper path for the file
+    const pixels = stbi.stbi_load("./src/assets/textures/atlas.png", &atlas_w, &atlas_h, &atlas_col_channels, 3);
+
+    var atlas_tex: c_uint = 0;
+    gl.glGenTextures(1, @ptrCast(&atlas_tex));
+    gl.glActiveTexture(gl.GL_TEXTURE0);
+    gl.glBindTexture(gl.GL_TEXTURE_2D, atlas_tex);
+    gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1);
+    gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB8, atlas_w, atlas_h, 0, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, pixels);
+
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST_MIPMAP_NEAREST);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_BORDER);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_BORDER);
+
+    const border_col: [4]f32 = [4]f32{ 0.0, 0.0, 0.0, 0.0 };
+    gl.glTexParameterfv(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_BORDER_COLOR, &border_col);
+
+    gl.glGenerateMipmap(gl.GL_TEXTURE_2D);
+    stbi.stbi_image_free(pixels);
+
+    gl.glUniform1i(gl.glGetUniformLocation(oc.shader.id, "uAtlas"), 0);
 
     var last_chunk_x: i32 = @intFromFloat(@floor(config.cam.pos.x / 32));
     var last_chunk_z: i32 = @intFromFloat(@floor(config.cam.pos.z / 32));
 
-    world.load_chunks(&config.cam) catch {
-        std.log.err("Failed to load initial chunks!", .{});
-        return;
-    };
-
-    var last_frame_time = glfw.getTime();
-    var frame_count: u32 = 0;
-    var fps_timer: f64 = 0.0;
-
     while (!glfw.windowShouldClose(w)) {
-        const current_frame_time = glfw.getTime();
-        const delta_time = current_frame_time - last_frame_time;
-        last_frame_time = current_frame_time;
-
-        frame_count += 1;
-        fps_timer += delta_time;
-
-        if (fps_timer >= 1.0) {
-            const fps = @as(f64, @floatFromInt(frame_count)) / fps_timer;
-            std.log.info("FPS: {d:.1}", .{fps});
-            frame_count = 0;
-            fps_timer = 0.0;
-        }
-
         processInput(w, &config);
 
         // Imgui
@@ -218,85 +134,82 @@ pub fn main() !void {
         // Break & Place blocks
         if (config.break_block) {
             config.break_block = false;
-            world.break_block(&config.cam);
+            try world.break_block(&config.cam);
         }
 
         if (config.place_block) {
             config.place_block = false;
-            world.place_block(&config.cam);
+            try world.place_block(&config.cam);
         }
 
         // clear bg
         gl.glClearColor(0.2, 0.3, 0.3, 1.0);
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
 
-        // draw
-        shader.?.use();
-
         // matrices :)
         const proj = math.Mat4.createPerspective(config.cam.fov_rad, config.cam.aspect_ratio, config.cam.near_clip, config.cam.far_clip);
         const view = math.Mat4.createLookAt(config.cam.pos, config.cam.target, config.cam.up);
         const light = [3]f32{ 0.2, -0.8, 0.3 }; // above left
-        //const model = math.Mat4.createAngleAxis(math.Vec3.new(1.0, 0.0, 0.0), @floatCast(glfw.getTime()));
 
         const proj_flat = flattenMatrix(4, proj.fields);
         const view_flat = flattenMatrix(4, view.fields);
-        //const model_flat = flattenMatrix(4, model.fields);
 
-        const projUni = gl.glGetUniformLocation(shader.?.id, "proj");
-        const viewUni = gl.glGetUniformLocation(shader.?.id, "view");
-        const modelUni = gl.glGetUniformLocation(shader.?.id, "model");
-        const lightDirUni = gl.glGetUniformLocation(shader.?.id, "ldir");
+        const projUni = gl.glGetUniformLocation(oc.shader.id, "proj");
+        const viewUni = gl.glGetUniformLocation(oc.shader.id, "view");
+        const modelUni = gl.glGetUniformLocation(oc.shader.id, "model");
+        const lightDirUni = gl.glGetUniformLocation(oc.shader.id, "ldir");
 
         gl.glUniformMatrix4fv(projUni, 1, gl.GL_FALSE, &proj_flat);
         gl.glUniformMatrix4fv(viewUni, 1, gl.GL_FALSE, &view_flat);
         gl.glUniform3fv(lightDirUni, 1, &light);
-        //gl.glUniformMatrix4fv(modelUni, 1, gl.GL_FALSE, &model_flat);
+
+        // draw
+        oc.shader.use();
 
         // update chunks
         const current_chunk_x: i32 = @intFromFloat(@floor(config.cam.pos.x / 32));
         const current_chunk_z: i32 = @intFromFloat(@floor(config.cam.pos.z / 32));
 
         if (current_chunk_x != last_chunk_x or current_chunk_z != last_chunk_z) {
-            world.load_chunks(&config.cam) catch break;
-            world.unload_chunks(&config.cam) catch break;
+            try world.load_chunks(&config.cam);
+            try world.unload_chunks(&config.cam);
             last_chunk_x = current_chunk_x;
             last_chunk_z = current_chunk_z;
         }
 
-        // sync generated meshes
-        world.done_mutex.?.lock();
-        while (world.done_queue.?.pop()) |chunk| {
-            if (chunk.state == .Destroying) {
-                chunk.destroy(alloc);
-            } else if (chunk.state == .Ready) {
+        // Upload chunks that are ready
+        world.chunks_mutex.lock();
+        while (world.done_queue.pop()) |hash| {
+            var chunk = world.chunks.get(hash) orelse continue;
+            chunk.mutex.lock();
+            if (chunk.state == .ToUpload) {
                 chunk.uploadMesh();
             }
+            chunk.mutex.unlock();
         }
-        world.done_mutex.?.unlock();
 
-        // chunks
-        var it = world.chunks.valueIterator();
-        while (it.next()) |chunk_ptr_ptr| {
-            const chunk_ptr = chunk_ptr_ptr.*;
-
+        var chunks_iter = world.chunks.valueIterator();
+        while (chunks_iter.next()) |chunk| {
             const chunk_offset = math.Mat4.createTranslation(math.Vec3.new(
-                @as(f32, @floatFromInt(chunk_ptr.pos.x)) * 32.0,
-                @as(f32, @floatFromInt(chunk_ptr.pos.y)) * 32.0,
-                @as(f32, @floatFromInt(chunk_ptr.pos.z)) * 32.0,
+                @as(f32, @floatFromInt(chunk.*.pos.x)) * 32.0,
+                @as(f32, @floatFromInt(chunk.*.pos.y)) * 32.0,
+                @as(f32, @floatFromInt(chunk.*.pos.z)) * 32.0,
             ));
 
             const model_flat = flattenMatrix(4, chunk_offset.fields);
             gl.glUniformMatrix4fv(modelUni, 1, gl.GL_FALSE, &model_flat);
 
             // Draw chunk
-            gl.glBindVertexArray(chunk_ptr.front_mesh.vao_handle);
-            gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk_ptr.front_mesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
+            gl.glBindVertexArray(chunk.*.fmesh.vao);
+            gl.glDrawElements(gl.GL_TRIANGLES, @intCast(chunk.*.fmesh.indices.items.len), gl.GL_UNSIGNED_INT, null);
         }
+        world.chunks_mutex.unlock();
         gl.glBindVertexArray(0);
 
         // redraw imgui
         draw_gui(&config, imio);
+        config.console.render();
+
         imgui.ImGui_Render();
         imgui.cImGui_ImplOpenGL3_RenderDrawData(imgui.ImGui_GetDrawData());
 
@@ -304,10 +217,6 @@ pub fn main() !void {
         glfw.swapBuffers(w);
         glfw.pollEvents();
     }
-
-    world.deinit();
-    glfw.destroyWindow(w);
-    glfw.terminate();
 }
 
 fn flattenMatrix(comptime N: usize, input: [N][N]f32) [N * N]f32 {
@@ -337,23 +246,36 @@ pub const Camera = struct {
 };
 
 const Config = struct {
+    fps: u32 = 60,
+    vsync: bool = true,
     wireframe: bool = false,
     v_was_pressed: bool = false,
     f_was_pressed: bool = false,
+    bt_was_pressed: bool = false,
     window_width: u32 = 800,
     window_height: u32 = 600,
     cam: Camera,
     break_block: bool = false,
     place_block: bool = false,
     last_block_action: f64 = 0.0,
-    block_cooldown: f64 = 0.001,
+    block_cooldown: f64 = 0.05,
     window_focused: bool = false,
+    console: Console,
 };
 
 fn processInput(w: ?*glfw.Window, config: *Config) void {
     if (glfw.getKey(w, glfw.KeyEscape) == 1) glfw.setWindowShouldClose(w, true);
-    const v_pressed = glfw.getKey(w, glfw.KeyV) == 1;
 
+    // Toggle console with backtick
+    const bt_pressed = glfw.getKey(w, glfw.KeyGraveAccent) == 1;
+    if (bt_pressed and !config.bt_was_pressed) {
+        config.console.visible = !config.console.visible;
+    }
+    config.bt_was_pressed = bt_pressed;
+
+    if (config.console.visible) return;
+
+    const v_pressed = glfw.getKey(w, glfw.KeyV) == 1;
     if (v_pressed and !config.v_was_pressed) {
         config.wireframe = !config.wireframe;
         if (config.wireframe) {
@@ -378,7 +300,7 @@ fn processInput(w: ?*glfw.Window, config: *Config) void {
     config.f_was_pressed = f_pressed;
 
     // Camera input
-    const speed: f32 = 1.0;
+    const speed: f32 = 0.3;
     const forward = math.Vec3.sub(config.cam.target, config.cam.pos).normalize();
     const right = math.Vec3.cross(forward, config.cam.up).normalize();
 
@@ -434,7 +356,7 @@ fn fb_size_callback(w: *c_long, width: c_int, height: c_int) callconv(.c) void {
 fn cursor_callback(w: *c_long, x: f64, y: f64) callconv(.c) void {
     const config = @as(*Config, @ptrCast(@alignCast(glfw.getWindowUserPointer(w).?)));
 
-    if (!config.window_focused) return;
+    if (!config.window_focused or config.console.visible) return;
 
     if (config.cam.first_move) {
         config.cam.last_x = x;
@@ -472,9 +394,26 @@ fn updateCamDir(cam: *Camera) void {
 }
 
 fn draw_gui(config: *Config, io: [*c]imgui.ImGuiIO_t) void {
-    _ = config;
-    _ = imgui.ImGui_Begin("Isolated", null, 0);
+    if (imgui.ImGui_Begin("Isolated", null, 0)) {
+        imgui.ImGui_Text("FPS (%.0f) POS (%.0f, %0.f, %0.f)", io.*.Framerate, config.cam.pos.x, config.cam.pos.y, config.cam.pos.z);
+        if (imgui.ImGui_BeginTabBar("bar", 0)) {
+            if (imgui.ImGui_BeginTabItem("General", null, 0)) {
+                imgui.ImGui_EndTabItem();
+            }
 
-    imgui.ImGui_Text("ms per: %.3f, FPS: %.1f", 1000.0 / io.*.Framerate, io.*.Framerate);
+            if (imgui.ImGui_BeginTabItem("Render", null, 0)) {
+                _ = imgui.ImGui_SliderInt("FPS", @ptrCast(&config.fps), 30, 120);
+                if (imgui.ImGui_Checkbox("V-Sync", @ptrCast(&config.vsync))) {
+                    if (config.vsync) {
+                        glfw.swapInterval(1);
+                    } else {
+                        glfw.swapInterval(0);
+                    }
+                }
+                imgui.ImGui_EndTabItem();
+            }
+            imgui.ImGui_EndTabBar();
+        }
+    }
     imgui.ImGui_End();
 }

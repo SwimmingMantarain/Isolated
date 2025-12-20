@@ -1,7 +1,8 @@
 // Builds Axis Columns
 typedef enum {
     Air = 0,
-    Solid = 1,
+    Grass = 1,
+    Dirt = 2,
 } Block;
 
 inline uint blocks_index(uint x, uint y, uint z) {
@@ -14,7 +15,7 @@ inline uint axis_index(uint axis, uint row, uint col) {
 
 __kernel void build_axis_cols(
     __global const uchar* blocks_flat, // each element: 0=Air or 1=Solid, length 32*32*32
-    __global uint* axis_cols_flat     // pre-zeroed, length = 3*32*32 (3072)
+    __global uint* axis_cols_flat      // pre-zeroed, length = 3*32*32 (3072)
 ) {
     const uint gx = get_global_id(0); // x in [0..31]
     const uint gy = get_global_id(1); // y in [0..31]
@@ -25,7 +26,8 @@ __kernel void build_axis_cols(
     const uint bidx = blocks_index(gx, gy, gz);
     const uchar block_val = blocks_flat[bidx];
 
-    if (block_val == Solid) {
+    // Check if the block is ANY solid (not Air)
+    if (block_val != Air) {
         const uint bit_y = (1u << gy);
         const uint bit_x = (1u << gx);
         const uint bit_z = (1u << gz);
@@ -71,7 +73,9 @@ typedef enum {
 
 __kernel void greedy_mesh(
     __global const uint* col_face_masks,
-	__global uint* out_planes
+    __global uint* out_planes,
+    __global const uchar* blocks_flat,
+    const uchar kind
 ) {
 	const uint face_index = get_global_id(0); // 0..6
     if (face_index >= 6u) return;
@@ -88,7 +92,15 @@ __kernel void greedy_mesh(
 				while (col != 0u) {
 				    uint y = ctz(col);
 					col &= col - 1u;
-					planes[y * 32u + x] |= (1u << z);
+                    
+                    // Verify that the block at this position matches the requested kind
+                    // For Y axis (faces pointing Up/Down), we need to check the correct block
+                    // face_index 0 = NegY (down), means block is at y. Neighbor is y-1 (Air).
+                    // face_index 1 = PosY (up), means block is at y. Neighbor is y+1 (Air).
+                    // The 'col' bits represent the position of the SOLID block.
+                    if (blocks_flat[blocks_index(x, y, z)] == kind) {
+					    planes[y * 32u + x] |= (1u << z);
+                    }
 				}
 			}
 		}
@@ -99,7 +111,10 @@ __kernel void greedy_mesh(
 				while (col != 0u) {
 				    uint x = ctz(col);
 					col &= col - 1u;
-					planes[x * 32u + y] |= (1u << z);
+
+                    if (blocks_flat[blocks_index(x, y, z)] == kind) {
+					    planes[x * 32u + y] |= (1u << z);
+                    }
 				}
 			}
 		}
@@ -110,7 +125,10 @@ __kernel void greedy_mesh(
 				while (col != 0u) {
 				    uint z = ctz(col);
 					col &= col - 1u;
-					planes[z * 32u + x] |= (1u << y);
+
+                    if (blocks_flat[blocks_index(x, y, z)] == kind) {
+					    planes[z * 32u + x] |= (1u << y);
+                    }
 				}
 			}
 		}
