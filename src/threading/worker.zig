@@ -97,7 +97,10 @@ pub fn chunker(world: *World(4, 1)) !void {
                         };
                         world.chunks_mutex.unlock();
 
-                        try chunk.mesh(world.alloc);
+                        const neighbours = try world.get_neighbours(chunk);
+                        defer world.alloc.free(neighbours);
+
+                        try chunk.mesh(world.alloc, neighbours);
 
                         world.done_queue.loop_push(hash);
                     }

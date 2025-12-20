@@ -1,16 +1,19 @@
 const std = @import("std");
 const noize = @import("noize");
 const gl = @cImport(@cInclude("glad/glad.h"));
+const glfw = @import("glfw");
 
 const Block = @import("./block.zig").Block;
 const Face = @import("./block.zig").Face;
 const ChunkMesh = @import("./mesh.zig").ChunkMesh;
+const GreedyQuad = @import("./mesh.zig").GreedyQuad;
 const Vertex = @import("./mesh.zig").Vertex;
 const OpenGLContext = @import("../renderer/opengl.zig").OpenGLContext;
 const iVec3 = @import("../util.zig").iVec3;
 
 const newVec3 = @import("../util.zig").newVec3;
 const newVec2 = @import("../util.zig").newVec2;
+const greedyMesh = @import("./mesh.zig").greedyMesh;
 
 pub const ChunkState = enum {
     Idle,
@@ -57,11 +60,11 @@ pub const Chunk = struct {
         alloc.destroy(self);
     }
 
-    pub fn getBlock(self: *Chunk, x: u32, y: u32, z: u32) Block {
+    pub fn getBlock(self: *Chunk, x: usize, y: usize, z: usize) Block {
         return self.blocks[y + (x * 32) + (z * 32 * 32)];
     }
 
-    pub fn getNeighbour(self: *Chunk, face: Face, x: u32, y: u32) Block {
+    pub fn getNeighbour(self: *Chunk, face: Face, x: usize, y: usize) Block {
         return self.border_blocks[(@as(u32, @intFromEnum(face)) * 32 * 32) + (32 * y) + x];
     }
 
@@ -92,6 +95,7 @@ pub const Chunk = struct {
     pub fn mesh(
         self: *Chunk,
         alloc: std.mem.Allocator,
+        neighbours: []?*Chunk,
     ) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -103,73 +107,161 @@ pub const Chunk = struct {
         self.bmesh.vertices.clearRetainingCapacity();
         self.bmesh.indices.clearRetainingCapacity();
 
-        for (0..32) |y| {
-            for (0..32) |x| {
-                for (0..32) |z| {
-                    const block = self.getBlock(@intCast(x), @intCast(y), @intCast(z));
+        const start = glfw.getTime();
+
+        // Build binary representation
+        var axis_cols: [3 * 32 * 32]u32 = undefined;
+        @memset(&axis_cols, 0);
+
+        for (0..32) |z| {
+            for (0..32) |y| {
+                for (0..32) |x| {
+                    const block = self.blocks[y + (x * 32) + (z * 32 * 32)];
                     if (!block.isSolid()) continue;
 
-                    // Handle neighbour chunks
-                    if (y == 0 or y == 31 or x == 0 or x == 31 or z == 0 or z == 31) {
-                        if (y == 0) { // NegY Face
-                            const neighbour_block = self.getNeighbour(.NegY, @intCast(x), @intCast(z));
-                            if (!neighbour_block.isSolid()) {
-                                try self.appendVertices(x, y, z, .NegY, block, alloc);
-                            }
-                        } else if (y == 31) { // PosY Face
-                            const neighbour_block = self.getNeighbour(.PosY, @intCast(x), @intCast(z));
-                            if (!neighbour_block.isSolid()) {
-                                try self.appendVertices(x, y, z, .PosY, block, alloc);
+                    axis_cols[(0 * 32 * 32) + (z * 32) + (x)] |= @as(u32, @intCast(1)) << @intCast(y);
+                    axis_cols[(1 * 32 * 32) + (y * 32) + (z)] |= @as(u32, @intCast(1)) << @intCast(x);
+                    axis_cols[(2 * 32 * 32) + (y * 32) + (x)] |= @as(u32, @intCast(1)) << @intCast(z);
+                }
+            }
+        }
+
+        // Face cull internal blocks
+        var face_col_masks: [6 * 32 * 32]u32 = undefined;
+        @memset(&face_col_masks, 0);
+
+        for (0..3) |axis| {
+            const base_face = 2 * 32 * 32 * axis;
+            for (0..32) |z| {
+                for (0..32) |x| {
+                    const col = axis_cols[(axis * 32 * 32) + (z * 32) + (x)];
+
+                    face_col_masks[(base_face) + (z * 32) + (x)] = col & ~(col << 1); // Descending axis
+                    face_col_masks[(base_face + 32 * 32) + (z * 32) + (x)] = col & ~(col >> 1); // Ascending axis
+                }
+            }
+        }
+
+        // Face cull borders
+        for (0..6) |face_idx| {
+            const face: Face = @enumFromInt(face_idx);
+
+            if (neighbours[face_idx]) |neighbour| {
+                const opposites = [_]Face{
+                    .PosY, .NegY,
+                    .PosX, .NegX,
+                    .PosZ, .NegZ,
+                };
+                const opposite_face = opposites[face_idx];
+
+                neighbour.mutex.lock();
+                const neighbour_border = neighbour.getBorder(opposite_face);
+                neighbour.mutex.unlock();
+
+                const face_base = face_idx * 32 * 32;
+                const axis = face_idx / 2; // 0 = Y, 1 = X, 2 = Z
+
+                var neighbour_cols: [32 * 32]u32 = undefined;
+                @memset(&neighbour_cols, 0);
+
+                if (axis == 0) { // Y
+                    for (0..32) |z| {
+                        for (0..32) |x| {
+                            const border_idx = z * 32 + x;
+                            // Check if ANY solid block exists
+                            if (neighbour_border[border_idx] != .Air) {
+                                const bit_pos: u5 = if (face == .PosY) 31 else 0;
+                                neighbour_cols[z * 32 + x] |= (@as(u32, 1) << bit_pos);
                             }
                         }
-
-                        if (x == 0) { // NegX Face
-                            const neighbour_block = self.getNeighbour(.NegX, @intCast(z), @intCast(y));
-                            if (!neighbour_block.isSolid()) {
-                                try self.appendVertices(x, y, z, .NegX, block, alloc);
-                            }
-                        } else if (x == 31) { // PosX Face
-                            const neighbour_block = self.getNeighbour(.PosX, @intCast(z), @intCast(y));
-                            if (!neighbour_block.isSolid()) {
-                                try self.appendVertices(x, y, z, .PosX, block, alloc);
-                            }
-                        }
-
-                        if (z == 0) { // NegZ Face
-                            const neighbour_block = self.getNeighbour(.NegZ, @intCast(x), @intCast(y));
-                            if (!neighbour_block.isSolid()) {
-                                try self.appendVertices(x, y, z, .NegZ, block, alloc);
-                            }
-                        } else if (z == 31) { // PosZ Face
-                            const neighbour_block = self.getNeighbour(.PosZ, @intCast(x), @intCast(y));
-                            if (!neighbour_block.isSolid()) {
-                                try self.appendVertices(x, y, z, .PosZ, block, alloc);
+                    }
+                } else if (axis == 1) { // X
+                    for (0..32) |y| {
+                        for (0..32) |z| {
+                            const border_idx = y * 32 + z;
+                            if (neighbour_border[border_idx] != .Air) {
+                                const bit_pos: u5 = if (face == .PosX) 31 else 0;
+                                neighbour_cols[y * 32 + z] |= (@as(u32, 1) << bit_pos);
                             }
                         }
                     }
+                } else { // Z
+                    for (0..32) |y| {
+                        for (0..32) |x| {
+                            const border_idx = y * 32 + x;
+                            if (neighbour_border[border_idx] != .Air) {
+                                const bit_pos: u5 = if (face == .PosZ) 31 else 0;
+                                neighbour_cols[y * 32 + x] |= (@as(u32, 1) << bit_pos);
+                            }
+                        }
+                    }
+                }
 
-                    // Handle blocks inside chunk
-                    if (y > 0 and !self.getBlock(@intCast(x), @intCast(y - 1), @intCast(z)).isSolid()) {
-                        try self.appendVertices(x, y, z, .NegY, block, alloc);
+                for (0..32 * 32) |i| {
+                    face_col_masks[face_base + i] &= ~neighbour_cols[i];
+                }
+            }
+        }
+
+        // iterate over each block type
+        const kinds = std.enums.values(Block);
+        for (kinds) |kind| {
+            if (kind == .Air) continue;
+
+            // Build 2d planes
+            var planes: [6 * 32 * 32]u32 = undefined;
+            @memset(&planes, 0);
+
+            for (0..6) |face| {
+                const axis = @divTrunc(face, 2);
+                for (0..32) |x| {
+                    for (0..32) |z| {
+                        var col = face_col_masks[(face * 32 * 32) + (z * 32) + (x)];
+
+                        while (col != 0) {
+                            const y: u32 = @ctz(col);
+                            col &= col - 1;
+
+                            const block = self.blocks[y + (x * 32) + (z * 32 * 32)];
+
+                            switch (axis) {
+                                0 => if (block == kind) {
+                                    planes[(face * 32 * 32) + (y * 32) + x] |= @as(u32, 1) << @as(u5, @intCast(z));
+                                },
+                                1 => if (block == kind) {
+                                    planes[(face * 32 * 32) + (y * 32) + z] |= @as(u32, 1) << @as(u5, @intCast(x));
+                                },
+                                2 => if (block == kind) {
+                                    planes[(face * 32 * 32) + (y * 32) + x] |= @as(u32, 1) << @as(u5, @intCast(z));
+                                },
+                                else => unreachable,
+                            }
+                        }
                     }
-                    if (y < 31 and !self.getBlock(@intCast(x), @intCast(y + 1), @intCast(z)).isSolid()) {
-                        try self.appendVertices(x, y, z, .PosY, block, alloc);
-                    }
-                    if (x > 0 and !self.getBlock(@intCast(x - 1), @intCast(y), @intCast(z)).isSolid()) {
-                        try self.appendVertices(x, y, z, .NegX, block, alloc);
-                    }
-                    if (x < 31 and !self.getBlock(@intCast(x + 1), @intCast(y), @intCast(z)).isSolid()) {
-                        try self.appendVertices(x, y, z, .PosX, block, alloc);
-                    }
-                    if (z > 0 and !self.getBlock(@intCast(x), @intCast(y), @intCast(z - 1)).isSolid()) {
-                        try self.appendVertices(x, y, z, .NegZ, block, alloc);
-                    }
-                    if (z < 31 and !self.getBlock(@intCast(x), @intCast(y), @intCast(z + 1)).isSolid()) {
-                        try self.appendVertices(x, y, z, .PosZ, block, alloc);
+                }
+            }
+
+            var quads = try std.ArrayList(GreedyQuad).initCapacity(alloc, 512);
+            defer quads.deinit(alloc);
+
+            // Greedy mesh
+            for (0..6) |face| {
+                for (0..32) |layer| {
+                    quads.clearRetainingCapacity();
+
+                    const layer_ptr = @as(*[32]u32, @ptrCast(&planes[(face * 32 * 32) + (layer * 32)]));
+                    try greedyMesh(layer_ptr, &quads);
+
+                    try self.bmesh.vertices.ensureUnusedCapacity(alloc, quads.items.len * 4);
+                    for (quads.items) |quad| {
+                        quad.appendVertices(&self.bmesh.vertices, @enumFromInt(face), layer, kind);
                     }
                 }
             }
         }
+
+        const elapsed = glfw.getTime() - start;
+        std.debug.print("Chunk vertices gened in: {d}\n", .{elapsed * 1000});
 
         // Generate indices for all vertices
         const vertex_count = self.bmesh.vertices.items.len;
@@ -184,64 +276,6 @@ pub const Chunk = struct {
         }
 
         self.state = .ToUpload;
-    }
-
-    pub fn appendVertices(
-        self: *Chunk,
-        ux: usize,
-        uy: usize,
-        uz: usize,
-        face: Face,
-        kind: Block,
-        alloc: std.mem.Allocator,
-    ) !void {
-        const normal = Face.normal(face);
-        const texCoords = kind.uv(face);
-
-        try self.bmesh.vertices.ensureUnusedCapacity(alloc, 4);
-
-        const x: f32 = @floatFromInt(ux);
-        const y: f32 = @floatFromInt(uy);
-        const z: f32 = @floatFromInt(uz);
-
-        switch (face) {
-            .PosY => {
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y + 1.0, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y + 1.0, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y + 1.0, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 1.0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y + 1.0, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 1.0) });
-            },
-            .NegY => {
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 1.0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 1.0) });
-            },
-            .PosX => {
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 1.0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y + 1.0, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y + 1.0, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 1.0) });
-            },
-            .NegX => {
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 1.0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y + 1.0, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y + 1.0, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 1.0) });
-            },
-            .PosZ => {
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 1.0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 1.0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y + 1.0, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y + 1.0, z + 1.0), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1.0, 0) });
-            },
-            .NegZ => {
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 1) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1, 1) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x + 1.0, y + 1.0, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(1, 0) });
-                self.bmesh.vertices.appendAssumeCapacity(Vertex{ .pos = newVec3(x, y + 1.0, z), .norm = normal, .tex_id = texCoords, .tex_uv = newVec2(0, 0) });
-            },
-        }
     }
 
     pub fn uploadMesh(self: *Chunk) void {
@@ -340,5 +374,11 @@ pub const Chunk = struct {
                 },
             }
         }
+    }
+
+    pub fn getBorder(self: *Chunk, face: Face) []Block {
+        const face_idx: usize = @intFromEnum(face);
+        const face_base: usize = face_idx * 32 * 32;
+        return self.border_blocks[face_base .. face_base + 32 * 32];
     }
 };
