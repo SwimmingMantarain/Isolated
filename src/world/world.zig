@@ -31,7 +31,8 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
         camera: *Camera,
         chunks: std.AutoHashMap(u64, *Chunk),
         chunks_mutex: std.Thread.Mutex,
-        job_queue: Queue(*ChunkJob, 64),
+        hjob_queue: Queue(*ChunkJob, 64),
+        mjob_queue: Queue(*ChunkJob, 64),
         done_queue: Queue(u64, 64),
         chunker: std.Thread,
         chunker_done: std.atomic.Value(bool) = .init(false),
@@ -47,7 +48,8 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
             self.chunks = .init(self.alloc);
             self.chunks_mutex = .{};
 
-            self.job_queue = try .init(self.alloc);
+            self.hjob_queue = try .init(self.alloc);
+            self.mjob_queue = try .init(self.alloc);
             self.done_queue = try .init(self.alloc);
             self.chunker = try std.Thread.spawn(.{}, chunker, .{self});
 
@@ -58,11 +60,17 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
             self.chunker_done.store(true, .seq_cst);
             self.chunker.join();
 
-            while (self.job_queue.pop()) |job| {
+            while (self.hjob_queue.pop()) |job| {
                 self.alloc.free(job.chunks);
                 self.alloc.destroy(job);
             }
-            self.job_queue.deinit(self.alloc);
+            self.hjob_queue.deinit(self.alloc);
+
+            while (self.mjob_queue.pop()) |job| {
+                self.alloc.free(job.chunks);
+                self.alloc.destroy(job);
+            }
+            self.mjob_queue.deinit(self.alloc);
             self.done_queue.deinit(self.alloc);
 
             var chunks_iter = self.chunks.valueIterator();
@@ -108,7 +116,7 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
                 .kind = .Generate,
             };
 
-            self.job_queue.loop_push(job);
+            self.mjob_queue.loop_push(job);
         }
 
         pub fn unload_chunks(self: *Self, cam: *Camera) !void {
@@ -177,7 +185,7 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
                     .kind = .Remesh,
                 };
 
-                self.job_queue.loop_push(job);
+                self.mjob_queue.loop_push(job);
             }
 
             if (chunks.items.len > 0) {
@@ -187,7 +195,7 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
                     .kind = .Destroy,
                 };
 
-                self.job_queue.loop_push(dj);
+                self.mjob_queue.loop_push(dj);
             }
 
             self.chunks_mutex.unlock();
@@ -372,7 +380,7 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
                     .kind = .UpdateBorders,
                 };
 
-                self.job_queue.loop_push(job);
+                self.hjob_queue.loop_push(job);
             }
         }
 
@@ -404,7 +412,7 @@ pub fn World(comptime chunk_radius: usize, comptime world_height: usize) type {
                     .kind = .UpdateBorders,
                 };
 
-                self.job_queue.loop_push(job);
+                self.hjob_queue.loop_push(job);
             }
         }
     };

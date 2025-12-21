@@ -144,33 +144,23 @@ pub const Chunk = struct {
 
         // Face cull borders
         for (0..6) |face_idx| {
-            const face: Face = @enumFromInt(face_idx);
-
             if (neighbours[face_idx]) |neighbour| {
-                const opposites = [_]Face{
-                    .PosY, .NegY,
-                    .PosX, .NegX,
-                    .PosZ, .NegZ,
-                };
-                const opposite_face = opposites[face_idx];
-
-                neighbour.mutex.lock();
-                const neighbour_border = neighbour.getBorder(opposite_face);
-                neighbour.mutex.unlock();
-
                 const face_base = face_idx * 32 * 32;
                 const axis = face_idx / 2; // 0 = Y, 1 = X, 2 = Z
 
                 var neighbour_cols: [32 * 32]u32 = undefined;
                 @memset(&neighbour_cols, 0);
 
+                neighbour.mutex.lock();
+
+                const is_even = (face_idx % 2) == 0;
+                const neighbour_layer: u32 = if (is_even) 31 else 0;
+
                 if (axis == 0) { // Y
                     for (0..32) |z| {
                         for (0..32) |x| {
-                            const border_idx = z * 32 + x;
-                            // Check if ANY solid block exists
-                            if (neighbour_border[border_idx] != .Air) {
-                                const bit_pos: u5 = if (face == .PosY) 31 else 0;
+                            if (neighbour.blocks[neighbour_layer + (x * 32) + (z * 32 * 32)] != .Air) {
+                                const bit_pos: u5 = if (is_even) 0 else 31;
                                 neighbour_cols[z * 32 + x] |= (@as(u32, 1) << bit_pos);
                             }
                         }
@@ -178,9 +168,8 @@ pub const Chunk = struct {
                 } else if (axis == 1) { // X
                     for (0..32) |y| {
                         for (0..32) |z| {
-                            const border_idx = y * 32 + z;
-                            if (neighbour_border[border_idx] != .Air) {
-                                const bit_pos: u5 = if (face == .PosX) 31 else 0;
+                            if (neighbour.blocks[y + (neighbour_layer * 32) + (z * 32 * 32)] != .Air) {
+                                const bit_pos: u5 = if (is_even) 0 else 31;
                                 neighbour_cols[y * 32 + z] |= (@as(u32, 1) << bit_pos);
                             }
                         }
@@ -188,14 +177,15 @@ pub const Chunk = struct {
                 } else { // Z
                     for (0..32) |y| {
                         for (0..32) |x| {
-                            const border_idx = y * 32 + x;
-                            if (neighbour_border[border_idx] != .Air) {
-                                const bit_pos: u5 = if (face == .PosZ) 31 else 0;
+                            if (neighbour.blocks[y + (x * 32) + (neighbour_layer * 32 * 32)] != .Air) {
+                                const bit_pos: u5 = if (is_even) 0 else 31;
                                 neighbour_cols[y * 32 + x] |= (@as(u32, 1) << bit_pos);
                             }
                         }
                     }
                 }
+
+                neighbour.mutex.unlock();
 
                 for (0..32 * 32) |i| {
                     face_col_masks[face_base + i] &= ~neighbour_cols[i];
