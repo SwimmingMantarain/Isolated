@@ -28,7 +28,7 @@ pub const ChunkJob = struct {
 
 pub fn chunker(world: *World(4, 1)) !void {
     while (!world.chunker_done.load(.acquire)) {
-        const maybe_job = world.job_queue.pop() orelse null;
+        const maybe_job = world.hjob_queue.pop() orelse world.mjob_queue.pop();
 
         if (maybe_job) |job| {
             switch (job.kind) {
@@ -49,7 +49,7 @@ pub fn chunker(world: *World(4, 1)) !void {
                         .kind = .UpdateBorders,
                     };
 
-                    world.job_queue.loop_push(bj);
+                    world.mjob_queue.loop_push(bj);
                 },
                 .UpdateBorders => {
                     var chunks = try std.ArrayList(u64).initCapacity(world.alloc, 32);
@@ -85,7 +85,7 @@ pub fn chunker(world: *World(4, 1)) !void {
                         .kind = .Remesh,
                     };
 
-                    world.job_queue.loop_push(mj);
+                    world.mjob_queue.loop_push(mj);
                     world.alloc.free(job.chunks);
                 },
                 .Remesh => {
