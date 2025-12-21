@@ -222,7 +222,27 @@ pub const Chunk = struct {
                             const y: u32 = @ctz(col);
                             col &= col - 1;
 
-                            const block = self.blocks[y + (x * 32) + (z * 32 * 32)];
+                            // Correctly map loop variables to coordinates based on axis
+                            const bx = switch (axis) {
+                                0 => x,
+                                1 => y, // Axis 1 (X) uses 'y' (bit) as X coordinate
+                                2 => x,
+                                else => unreachable,
+                            };
+                            const by = switch (axis) {
+                                0 => y, // Axis 0 (Y) uses 'y' (bit) as Y coordinate
+                                1 => z,
+                                2 => z,
+                                else => unreachable,
+                            };
+                            const bz = switch (axis) {
+                                0 => z,
+                                1 => x,
+                                2 => y, // Axis 2 (Z) uses 'y' (bit) as Z coordinate
+                                else => unreachable,
+                            };
+
+                            const block = self.blocks[by + (bx * 32) + (bz * 32 * 32)];
 
                             switch (axis) {
                                 0 => if (block == kind) {
