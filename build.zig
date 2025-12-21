@@ -15,16 +15,6 @@ pub fn build(b: *std.Build) void {
     // zlm
     const dep_zlm = b.dependency("zlm", .{});
 
-    // my noize
-    const dep_noize = b.dependency("noize", .{
-        .target = target,
-        .optimize = optimize,
-        //.use_gl = true,
-    });
-
-    const mod_noize = dep_noize.module("noize");
-    mod_noize.addSystemIncludePath(b.path("./src/glad/include"));
-
     const exe = b.addExecutable(.{
         .name = "isolated",
         .root_module = b.createModule(.{
@@ -34,7 +24,6 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "glfw", .module = dep_glfw.module("glfw") },
                 .{ .name = "zlm", .module = dep_zlm.module("zlm") },
-                .{ .name = "noize", .module = mod_noize },
             },
         }),
     });

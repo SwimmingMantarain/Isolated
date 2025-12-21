@@ -16,9 +16,6 @@
             .url = "https://github.com/ziglibs/zlm/archive/refs/heads/master.zip",
             .hash = "zlm-0.1.0-LoZ6yDawAADMopilIe9MDzer0UqmruCy_PuhNv4OMc7c",
         },
-        .noize = .{
-            .path = "../noize",
-        },
         .cimgui_zig = .{
             .url = "git+https://github.com/tiawl/cimgui.zig?ref=docking#e6ae67a18e2870ba3cedd3be60da2c8c704d925a",
             .hash = "cimgui_zig-1.0.0-2XubkmMfYQBbi54yN5XN4EkdEaROpaPs_qa9ybwJVxub",
