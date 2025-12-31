@@ -1,4 +1,1 @@
-.zig-cache/
-zig-out/
-imgui.ini
-mise.toml
+/target
