@@ -4,11 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bitflags = "2.10.0"
-image = "0.25.9"
-rusttype = "0.9.3"
-sokol = { version="*", git="https://github.com/floooh/sokol-rust.git" }
-stb_image = "0.3.0"
-stb_rect_pack_sys = "0.3.0"
-strum = "0.27.2"
-strum_macros = "0.27.2"
+bevy = { version = "0.17.3", features = ["dynamic_linking"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
